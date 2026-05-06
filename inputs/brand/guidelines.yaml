@@ -1,0 +1,25 @@
+brand_id: "aquacorp_global"
+voice_and_tone:
+  personality: ["refreshing", "honest", "energetic"]
+  avoid: ["clinical", "aggressive", "hyperbolic"]
+visual_identity:
+  primary_colors: ["#00B4D8", "#FFFFFF", "#023E8A"]
+  accent_colors: ["#90E0EF"]
+  logo_path: "inputs/assets/global/logo.png"
+  logo_placement: "top-right"
+  safe_zone_pct: 0.08
+typography:
+  headline_font: "Montserrat-Bold.ttf"
+  body_font: "OpenSans-Regular.ttf"
+  text_color_on_dark: "#FFFFFF"
+  text_color_on_light: "#023E8A"
+imagery_style:
+  mood: "bright, natural, outdoors"
+  avoid: ["dark backgrounds", "artificial lighting", "cluttered scenes"]
+  style_prompt_suffix: "photorealistic, vibrant, lifestyle photography, white background"
+legal:
+  prohibited_words: ["guaranteed", "best", "cure", "clinically proven"]
+  required_disclaimers:
+    MX: "Aplican términos y condiciones."
+    BR: "Consulte os termos e condições."
+    CO: "Aplican términos y condiciones."

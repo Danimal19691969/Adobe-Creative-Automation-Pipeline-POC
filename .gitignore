@@ -1,0 +1,24 @@
+# Secret environment files
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.uv/
+*.egg-info/
+
+# Test/cache
+.pytest_cache/
+.ruff_cache/
+
+# Mac
+.DS_Store
+
+# Generated outputs
+outputs/*
+!outputs/.gitkeep
+DOCS/FDE-TAKE_HOME.pdf
+DOCS/PLANS/

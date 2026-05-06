@@ -1,0 +1,18 @@
+campaign_id: "summer_refresh_2025"
+brand_id: "aquacorp_global"
+region: "LATAM"
+markets: ["MX", "BR", "CO"]
+target_audience: "Health-conscious adults 25-40"
+campaign_message:
+  en: "Refresh your summer, naturally."
+  es: "Refresca tu verano, naturalmente."
+  pt: "Renove seu verão, naturalmente."
+products:
+  - id: aquavita_sparkling
+    name: "AquaVita Sparkling Water"
+    category: beverage
+    description: "Lightly carbonated mineral water with natural fruit essence"
+  - id: sunguard_spf50
+    name: "SunGuard SPF 50 Lotion"
+    category: skincare
+    description: "Reef-safe broad-spectrum sunscreen for active outdoor use"

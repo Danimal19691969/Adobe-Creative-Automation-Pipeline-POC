@@ -29,9 +29,92 @@ typography:
   body_size_ratio: 0.018
   headline_case: "sentence"
 
+  # Aspect-ratio-specific typography targets. The composer honors these as
+  # hard min/max font-size floors and ceilings (in pixels) and a target
+  # vertical-fill ratio inside the headline box. QCCheckerAgent independently
+  # measures the final-render contrast.
+  per_aspect:
+    "1x1":
+      # Candidate boxes are now taller (h≈0.28) so the composer can scale
+      # the headline confidently when the box is clean. The ceiling and
+      # zone-fill target are the levers — the composer always picks the
+      # *largest* fitting size in [min, max] subject to line-count bounds,
+      # so raising max + raising target_zone_fill yields visibly larger
+      # campaign copy on clean photography.
+      headline_min_font_size_px: 52
+      headline_max_font_size_px: 80
+      headline_target_zone_fill_pct: 0.62
+      preferred_line_count: 2
+      disclaimer_min_font_size_px: 18
+      disclaimer_max_font_size_px: 26
+      disclaimer_font_size_pct_of_height: 0.018
+
+    "9x16":
+      # Candidate boxes pulled to the left third (x_max ≤ 0.52) and
+      # taller (h≈0.24) so a 2-line hero headline at 90–100px reads as
+      # confident campaign copy, not a caption.
+      headline_min_font_size_px: 60
+      headline_max_font_size_px: 100
+      headline_target_zone_fill_pct: 0.62
+      preferred_line_count: 2
+      disclaimer_min_font_size_px: 20
+      disclaimer_max_font_size_px: 28
+      disclaimer_font_size_pct_of_height: 0.014
+
+    "16x9":
+      # 16:9 is the campaign hero shape — copy should feel large and
+      # intentional. Candidate boxes are 0.30 high; the composer can hit
+      # ~110px on a 2-line headline within that budget. Object-clearance
+      # gate still applies, so crowded photography won't push the headline
+      # past the ceiling.
+      headline_min_font_size_px: 88
+      headline_max_font_size_px: 118
+      headline_target_zone_fill_pct: 0.78
+      preferred_line_count: 2
+      # Legal must remain readable; previous 16:9 disclaimer was ~19px,
+      # well into "microcopy" territory. Floor raised from 24 → 30 so the
+      # legal line clears its own readability bar without shrinking.
+      disclaimer_min_font_size_px: 30
+      disclaimer_max_font_size_px: 38
+      disclaimer_font_size_pct_of_height: 0.030
+
 # Palette guidance — applied to the image-gen prompt. Each campaign can override.
 generation_palette_hint: "cyan, deep navy, clean white, fresh water tones, bright summer highlights"
 brand_palette_influence: medium
+
+# Photographic composition direction — fed to the image-generation prompt so
+# source photography ships with natural negative space for headline copy.
+# This is the primary readability mechanism; the composer's panel/badge
+# treatments are last-resort fallbacks, not the default.
+image_composition_guidance:
+  negative_space_required: true
+  negative_space_location_by_aspect:
+    "1x1": "lower-left clean area, product upper-right"
+    "9x16": "lower-third clean area, product upper-center"
+    "16x9": "left third clean negative space, product center-right or right third"
+  text_safe_area_prompt: >
+    Leave a clean, softly blurred area with low visual detail for headline copy.
+  avoid_behind_text:
+    - "striped towels"
+    - "busy fabric patterns"
+    - "product edges"
+    - "hands"
+    - "labels"
+    - "high-contrast clutter"
+    - "small objects"
+    - "sharp horizon lines through the copy area"
+  preferred_behind_text:
+    - "soft ocean gradient"
+    - "clean sky"
+    - "smooth sand"
+    - "blurred beach background"
+    - "simple light-to-mid tone area"
+  product_position_by_aspect:
+    "1x1": "upper-right or center-right, leaving a clean lower-left for copy"
+    "9x16": "upper-center, leaving lower third for copy"
+    "16x9": "center-right or right third, leaving left third for copy"
+  depth_of_field: "shallow depth of field, copy area softly blurred"
+  composition_style: "premium commercial product photography with intentional copy space"
 
 # Layout templates — composer reads template_name from the brief, then this map.
 # Add new templates without touching code.
@@ -51,7 +134,9 @@ layout_templates:
 
   # Polished campaign-creative layout. Soft vertical gradient from the bottom,
   # per-aspect headline boxes that avoid the product focal area, brand accent
-  # rail, disclaimer in a clean bottom corner.
+  # rail, disclaimer in a clean bottom corner. Local readability treatments
+  # (soft panel behind headline, soft badge behind disclaimer) keep copy
+  # legible over busy photography without resorting to a hard scrim.
   premium_product_hero:
     overlay_style: vertical_gradient
     overlay_opacity_pct: 0.65
@@ -65,16 +150,115 @@ layout_templates:
     disclaimer_placement: bottom_corner
     disclaimer_padding_pct: 0.030
     text_align_default: left
+
+    # Default headline readability is delivered by the photography itself
+    # (see image_composition_guidance above). The composer applies a subtle
+    # text shadow as the always-on perceptual aid, and only escalates further
+    # when its contrast estimate falls below brand.qc threshold — see
+    # readability_fallback_order below.
+    headline_background_treatment: none
+    headline_panel_opacity_pct: 0.55
+    headline_panel_padding_pct: 0.030
+    headline_panel_corner_radius_pct: 0.015
+    headline_text_shadow: true
+    avoid_textured_regions: true
+
+    # Disclaimer relies on natural composition + the small body font; the
+    # disclaimer-contrast QC rule is the safety net.
+    disclaimer_background_treatment: none
+    disclaimer_badge_opacity_pct: 0.55
+    disclaimer_badge_padding_pct: 0.018
+    disclaimer_badge_corner_radius_pct: 0.012
+
+    # Escalation order when the composer's contrast estimate fails the brand
+    # threshold. The composer walks this list in order until one step pushes
+    # contrast over the bar, and records which step was used in the report.
+    readability_fallback_order:
+      - choose_best_brand_text_color
+      - subtle_text_shadow
+      - reposition_within_text_safe_area
+      - subtle_local_gradient
+      - soft_panel_last_resort
+
+    # Candidate-headline scoring + focal-area protection. Layout-level toggles
+    # gate the scorer; per-aspect blocks below carry the actual candidate
+    # boxes and line-count constraints.
+    enable_candidate_headline_scoring: true
+    avoid_busy_text_regions: true
+    avoid_focal_overlap: true
+    focal_area_padding_pct: 0.04
+    text_region_max_edge_density: 0.18
+    text_region_max_texture_score: 0.55
+    focal_overlap_penalty_weight: 0.6
+
+    # Object-clearance / breathing-room rules. The composer expands the focal
+    # safe zone by ``object_text_clearance_pct * min(W, H)`` AND by the
+    # per-aspect ``min_text_object_gap_px`` (whichever is larger); candidate
+    # boxes that fall inside the expanded zone are penalized; ones inside
+    # the *unexpanded* zone are hard-rejected when
+    # ``hard_fail_text_object_collision`` is True.
+    object_text_clearance_pct: 0.035
+    min_text_object_gap_px:
+      "1x1": 36
+      "9x16": 42
+      "16x9": 48
+    object_clearance_penalty: 0.65
+    hard_fail_text_object_collision: true
+
     per_aspect:
       "1x1":
-        headline_box: [0.06, 0.62, 0.78, 0.92]
+        # headline_box is the single-zone fallback. headline_candidate_boxes
+        # is the preferred path: composer scores each box (contrast +
+        # texture stddev + Canny edge density + focal overlap) and picks
+        # the cleanest viable zone. Boxes are pulled to the left third so
+        # center/right product photography (e.g. a bottle in the middle of
+        # the frame) has at least one viable candidate sitting *outside*
+        # the product safe zone, and made tall enough (h≈0.28) to hold a
+        # confident 2-line headline within the per-aspect typography
+        # ceiling — small boxes were forcing timid 44px copy.
+        headline_box: [0.06, 0.60, 0.78, 0.92]
         text_align: left
+        headline_candidate_boxes:
+          - [0.05, 0.16, 0.42, 0.44]   # upper-left
+          - [0.05, 0.38, 0.42, 0.66]   # mid-left
+          - [0.05, 0.58, 0.42, 0.86]   # lower-left
+        avoid_busy_regions: true
+        busy_region_penalty: 0.35
+        object_overlap_penalty: 0.45
+        min_contrast_precheck: 3.0
+        min_line_count: 2
+        max_line_count: 3
+
       "9x16":
-        headline_box: [0.06, 0.66, 0.94, 0.92]
+        # Left-third candidates so a center-positioned bottle does not
+        # collide with any candidate. Boxes are 0.24 high so a 2-line
+        # headline at 90–100px reads as confident campaign copy. Lower-left
+        # candidate is slightly wider (x_max=0.52) because the tall canvas
+        # allows more breathing room from the bottom focal area.
+        headline_box: [0.06, 0.64, 0.94, 0.92]
         text_align: left
+        headline_candidate_boxes:
+          - [0.05, 0.18, 0.48, 0.42]
+          - [0.05, 0.42, 0.48, 0.66]
+          - [0.05, 0.60, 0.52, 0.86]
+        avoid_busy_regions: true
+        min_line_count: 2
+        max_line_count: 3
+
       "16x9":
-        headline_box: [0.04, 0.50, 0.55, 0.93]
+        # 16:9 is the campaign hero shape — candidate boxes are 0.30 high
+        # and widened to x_max=0.55 so a 2-line wrap of the demo
+        # headline can land at ~95–105px (the practical ceiling for the
+        # current campaign string in a left-half box).
+        headline_box: [0.04, 0.46, 0.58, 0.93]
         text_align: left
+        headline_candidate_boxes:
+          - [0.05, 0.36, 0.55, 0.66]   # mid-left (preferred)
+          - [0.05, 0.20, 0.55, 0.50]   # upper-left
+          - [0.05, 0.50, 0.55, 0.80]   # lower-left
+        avoid_busy_regions: true
+        min_line_count: 1
+        max_line_count: 3
 
 aspect_ratios:
   "1x1":  [1080, 1080]
@@ -102,13 +286,15 @@ legal:
 required_brand_checks:
   palette_match: true
   logo_presence: true
-  contrast_ratio: true   # WCAG headline-vs-background contrast QC
+  contrast_ratio: true        # WCAG headline-vs-background contrast QC
+  disclaimer_contrast: true   # WCAG disclaimer-vs-background contrast QC
 
 # Quality-control thresholds (WCAG 2.1 AA defaults).
 qc:
-  min_contrast_ratio: 4.5             # AA normal text
-  large_text_min_ratio: 3.0           # AA for ≥18pt or ≥14pt bold
-  large_text_size_threshold_px: 24    # below this, treat as normal text
+  min_contrast_ratio: 4.5              # AA normal text (headline)
+  large_text_min_ratio: 3.0            # AA for ≥18pt or ≥14pt bold (headline)
+  large_text_size_threshold_px: 24
+  disclaimer_min_contrast_ratio: 4.5   # legal copy must clear AA normal text
 
 market_locales:
   MX: ["es", "en"]

@@ -31,31 +31,51 @@ products:
   prompt_keywords:
   - premium sparkling water product photography
   - realistic glass bottle hero with light condensation
-  - fresh citrus garnish, ice, bubbles
-  - warm summer light
-  - soft lifestyle background, beach or garden bokeh
-  - strong depth and reflections
-  - clean negative space at the bottom for copy overlay
-  - high-end consumer goods campaign style
+  - bottle positioned in the right third of the frame, fully visible and not cropped
+  - left third of the frame reserved as clean copy-safe negative space
+  - simple soft turquoise pool water, calm sky, or pale stone as the left-side backdrop
+  - smooth low-detail surfaces behind the copy area, softly out of focus
+  - garnish (mint, cucumber, lime) only allowed near the product base on the right side, never in the left third
+  - sunlit modern poolside terrace with pale stone surface
+  - crisp morning light with fresh spa-like atmosphere
+  - shallow depth of field with the copy area gently blurred
+  - high-end wellness and resort lifestyle campaign style
   prompt_avoid:
   - embedded text or words in the image
   - tiny fake label text
   - flat placeholder mockup
-  - "stock-photo clich\xE9"
+  - stock-photo cliche
+  - garnish, mint, cucumber, lime, fruit slices, bubbles, droplets, or props on the left side of the frame
+  - busy patterns, foliage, reflections, ripples, or high-contrast objects in the left third
+  - hands, arms, faces, or bodies near the copy area
+  - bottle cropped, tilted out of frame, or pushed to the center
+  - cluttered tabletop scenes
+  - multiple bottles or stacked products
+  - sharp horizon lines or strong gradients cutting through the left third
 - id: sunguard_spf50
   name: SunGuard SPF 50 Lotion
   category: skincare
   description: Reef-safe broad-spectrum sunscreen for active outdoor use
   prompt_keywords:
-  - premium sunscreen and skincare product photography
-  - realistic SPF 50 white pump bottle hero
-  - beach towel, sunlight, sand, skincare lifestyle scene
-  - warm summer light with strong shadows and reflections
-  - shallow depth of field
-  - clean negative space at the bottom for copy overlay
-  - high-end social campaign style
+  - premium reef-safe sunscreen product photography
+  - realistic SPF 50 white pump bottle hero with clean highlights
+  - sunlit poolside resort setting with pale stone surface
+  - soft turquoise pool water and blurred palm shadows
+  - fresh aloe leaf, mineral sunscreen texture, and subtle water droplets
+  - bright clean summer light with gentle reflections
+  - product positioned center-right with clear silhouette
+  - clean left-side or lower-left negative space for copy overlay
+  - high-end skincare and outdoor wellness campaign style
   prompt_avoid:
   - embedded text or words in the image
-  - giant fake SPF text cropped awkwardly
-  - people in the frame
+  - tiny fake label text
   - flat placeholder mockup
+  - "stock-photo clich\xE9"
+  - beach towels
+  - striped fabric
+  - busy patterns behind the copy area
+  - cluttered beach props
+  - hands holding the product
+  - crowded beach scene
+  - harsh yellow color cast
+  - medical or clinical product styling

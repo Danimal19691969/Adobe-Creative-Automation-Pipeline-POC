@@ -25,6 +25,28 @@ def _started_at_or_now(state: dict) -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _derive_source_origin(product_state: dict) -> str:
+    """Unambiguous label for where the source hero came from this run.
+
+    Possible values (from existing per-product state, no new state shape):
+      - "generated_this_run"            — ImageGeneratorAgent fired the API this run
+      - "reused_generated_previous_run" — AssetManager loaded a prior outputs/{pid}/source/* file
+      - "reused_local_placeholder"      — AssetManager loaded inputs/assets/{pid}/hero.*
+      - "no_source"                     — neither path produced a hero (failure mode)
+    """
+    asset_source = product_state.get("asset_source")
+    used_cache = product_state.get("used_cache")
+    if asset_source == "user_supplied":
+        return "reused_local_placeholder"
+    if asset_source in ("openai_generated", "imagen_generated"):
+        return "reused_generated_previous_run" if used_cache else "generated_this_run"
+    if asset_source == "generated_cached":
+        return "reused_generated_previous_run"
+    if asset_source is None and product_state.get("hero_path") is None:
+        return "no_source"
+    return "unknown"
+
+
 class ReportingAgent(BaseAgent):
     async def _run_async_impl(self, ctx):
         state = ctx.session.state
@@ -53,6 +75,7 @@ class ReportingAgent(BaseAgent):
             legal_check = ps.get("legal_check", {}) or {}
             per_brand = {item["path"]: item for item in brand_check.get("per_output", [])}
             qc_check = ps.get("qc_check", {}) or {}
+            source_origin = _derive_source_origin(ps)
 
             output_records = []
             for o in outputs:
@@ -68,6 +91,7 @@ class ReportingAgent(BaseAgent):
                     # Per-output provenance, mirrored from product-level state so each
                     # output row is self-contained for downstream consumers.
                     "source_asset_path": ps.get("hero_path"),
+                    "source_origin": source_origin,
                     "asset_source": ps.get("asset_source"),
                     "image_provider": ps.get("image_provider"),
                     "image_model": ps.get("image_model"),
@@ -90,6 +114,63 @@ class ReportingAgent(BaseAgent):
                     "overlay_opacity": o.get("overlay_opacity"),
                     "accent_style": o.get("accent_style"),
                     "accent_color": o.get("accent_color"),
+                    # Final rendered type sizes — driven by brand.typography.per_aspect.
+                    "headline_size_px": o.get("headline_size_px"),
+                    "headline_line_count": o.get("headline_line_count"),
+                    "disclaimer_size_px": o.get("disclaimer_size_px"),
+                    # Local readability treatments (panel behind headline,
+                    # badge behind disclaimer) and headline zone-fill telemetry.
+                    "headline_background_treatment": o.get("headline_background_treatment"),
+                    "headline_text_shadow": o.get("headline_text_shadow"),
+                    "headline_zone_fill_pct": o.get("headline_zone_fill_pct"),
+                    "disclaimer_background_treatment": o.get("disclaimer_background_treatment"),
+                    # Photographic-composition + fallback telemetry.
+                    "image_composition_guidance_used": o.get("image_composition_guidance_used"),
+                    "negative_space_location": o.get("negative_space_location"),
+                    "readability_fallback_used": o.get("readability_fallback_used"),
+                    "composer_contrast_estimate": o.get("composer_contrast_estimate"),
+                    "post_treatment_contrast_estimate": o.get("post_treatment_contrast_estimate"),
+                    # Headline-zone selection audit (text-safe-area scoring).
+                    "headline_box_selected": o.get("headline_box_selected_pct"),
+                    "headline_box_selected_pct": o.get("headline_box_selected_pct"),
+                    "headline_box_selected_px": o.get("headline_box_selected_px"),
+                    "headline_selection_reason": o.get("headline_box_selection_reason"),
+                    "headline_box_selection_reason": o.get("headline_box_selection_reason"),
+                    "headline_box_score": o.get("headline_box_score"),
+                    "headline_box_scores": o.get("headline_box_candidates"),
+                    "headline_region_texture_score": o.get("headline_region_texture_score"),
+                    "headline_region_edge_density": o.get("headline_region_edge_density"),
+                    "headline_region_contrast_estimate": o.get("headline_region_contrast_estimate"),
+                    "headline_color_selected": o.get("headline_color_selected"),
+                    "headline_wrap_variant": o.get("headline_wrap_variant"),
+                    "headline_scale_reason": o.get("headline_scale_reason"),
+                    "headline_fit_status": o.get("headline_fit_status"),
+                    # Prominence score (chosen size / configured ceiling).
+                    "headline_prominence_score": o.get("headline_prominence_score"),
+                    "headline_max_size_px_configured": o.get("headline_max_size_px_configured"),
+                    "headline_min_size_px_configured": o.get("headline_min_size_px_configured"),
+                    "headline_target_h_px": o.get("headline_target_h_px"),
+                    "headline_box_candidates": o.get("headline_box_candidates"),
+                    # Focal-area / product safe-zone audit.
+                    "focal_area_estimate": o.get("focal_area_estimate"),
+                    "product_safe_zone_box": o.get("product_safe_zone_box"),
+                    "expanded_product_safe_zone_box": o.get("expanded_product_safe_zone_box"),
+                    "focal_overlap_detected": o.get("focal_overlap_detected"),
+                    "focal_near_miss_detected": o.get("focal_near_miss_detected"),
+                    "focal_overlap_pct": o.get("focal_overlap_pct"),
+                    "text_object_gap_px": o.get("text_object_gap_px"),
+                    "text_object_clearance_pass": o.get("text_object_clearance_pass"),
+                    # Headline-box adjustment audit.
+                    "headline_box_original": o.get("headline_box_original"),
+                    "headline_box_adjusted": o.get("headline_box_adjusted"),
+                    "headline_box_adjustment_reason": o.get("headline_box_adjustment_reason"),
+                    # Disclaimer clearance audit.
+                    "disclaimer_text_object_gap_px": o.get("disclaimer_text_object_gap_px"),
+                    "disclaimer_clearance_pass": o.get("disclaimer_clearance_pass"),
+                    # Disclaimer-contrast QC (set when required_brand_checks.disclaimer_contrast is true).
+                    "disclaimer_contrast_ratio": qc.get("disclaimer_contrast_ratio"),
+                    "disclaimer_wcag_level": qc.get("disclaimer_wcag_level"),
+                    "disclaimer_background_sample_color": qc.get("disclaimer_background_color"),
                     # Brand check, with scores + reason.
                     "brand_check": bc.get("status", "n/a"),
                     "brand_check_reason": bc.get("brand_check_reason"),
@@ -109,6 +190,9 @@ class ReportingAgent(BaseAgent):
                 "product_id": pid,
                 "asset_source": ps.get("asset_source"),
                 "source_asset_path": ps.get("hero_path"),
+                # Unambiguous label: generated_this_run | reused_generated_previous_run
+                # | reused_local_placeholder | no_source.
+                "source_origin": source_origin,
                 "image_provider": ps.get("image_provider"),
                 "image_model": ps.get("image_model"),
                 "image_gen_latency_ms": ps.get("image_gen_latency_ms"),

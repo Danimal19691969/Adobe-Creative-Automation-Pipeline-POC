@@ -82,6 +82,27 @@ class TextAlign(str, Enum):
     RIGHT = "right"
 
 
+class HeadlineBackgroundTreatment(str, Enum):
+    NONE = "none"
+    SOFT_PANEL = "soft_panel"
+
+
+class DisclaimerBackgroundTreatment(str, Enum):
+    NONE = "none"
+    SOFT_BADGE = "soft_badge"
+
+
+class ReadabilityFallback(str, Enum):
+    """Ordered escalation steps the composer applies when its contrast
+    estimate falls below the brand's threshold. Composer iterates until one
+    step pushes the estimate over the bar (or the chain is exhausted)."""
+    CHOOSE_BEST_BRAND_TEXT_COLOR = "choose_best_brand_text_color"
+    SUBTLE_TEXT_SHADOW = "subtle_text_shadow"
+    REPOSITION_WITHIN_TEXT_SAFE_AREA = "reposition_within_text_safe_area"
+    SUBTLE_LOCAL_GRADIENT = "subtle_local_gradient"
+    SOFT_PANEL_LAST_RESORT = "soft_panel_last_resort"
+
+
 def _validate_hex(value: str) -> str:
     if not _HEX_RE.match(value):
         raise ValueError(f"Invalid hex color {value!r}; expected '#RRGGBB'")
@@ -137,6 +158,42 @@ class VisualIdentity(BaseModel):
         return self
 
 
+class PerAspectTypography(BaseModel):
+    """Per-aspect-ratio typography targets.
+
+    Composer honors these as hard pixel floors/ceilings + a target vertical
+    fill ratio inside the headline box. ``preferred_line_count`` is a soft
+    bias: the composer picks the largest size in [min, max] that fits the
+    target height; if multiple sizes fit, it prefers ones that wrap to the
+    requested line count.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    headline_min_font_size_px: int = Field(default=20, gt=0)
+    headline_max_font_size_px: int = Field(default=200, gt=0)
+    headline_target_zone_fill_pct: float = Field(default=0.50, gt=0.0, le=1.0)
+    preferred_line_count: int = Field(default=2, ge=1, le=10)
+    disclaimer_min_font_size_px: int = Field(default=12, gt=0)
+    disclaimer_max_font_size_px: int = Field(default=80, gt=0)
+    # Optional per-aspect override of typography.body_size_ratio (used as
+    # initial target for the disclaimer; clamped by min/max).
+    disclaimer_font_size_pct_of_height: Optional[float] = Field(default=None, gt=0.0, le=0.2)
+
+    @model_validator(mode="after")
+    def _ranges_consistent(self) -> "PerAspectTypography":
+        if self.headline_min_font_size_px > self.headline_max_font_size_px:
+            raise ValueError(
+                f"headline_min_font_size_px ({self.headline_min_font_size_px}) "
+                f"must be ≤ headline_max_font_size_px ({self.headline_max_font_size_px})"
+            )
+        if self.disclaimer_min_font_size_px > self.disclaimer_max_font_size_px:
+            raise ValueError(
+                f"disclaimer_min_font_size_px ({self.disclaimer_min_font_size_px}) "
+                f"must be ≤ disclaimer_max_font_size_px ({self.disclaimer_max_font_size_px})"
+            )
+        return self
+
+
 class Typography(BaseModel):
     headline_font: str
     body_font: str
@@ -147,6 +204,11 @@ class Typography(BaseModel):
     body_size_ratio: float = Field(default=0.022, gt=0.0, le=0.2)
     headline_case: HeadlineCase = HeadlineCase.SENTENCE
 
+    # Aspect-ratio-keyed typography overrides. Any aspect ratio absent from
+    # this map falls back to the global headline_size_ratio / body_size_ratio
+    # plus the composer's safe pixel-size fallbacks.
+    per_aspect: dict[str, PerAspectTypography] = Field(default_factory=dict)
+
     @field_validator("text_color_on_dark", "text_color_on_light")
     @classmethod
     def _hex(cls, v: str) -> str:
@@ -156,14 +218,32 @@ class Typography(BaseModel):
 class PerAspectLayout(BaseModel):
     """Per-aspect-ratio overrides for the layout template.
 
-    headline_box is (x0, y0, x1, y1) as fractions of (W, H). Defaults to the
-    bottom band (full width, lower 30%). The composer renders the headline
-    and disclaimer inside this box with the configured text_align.
+    ``headline_box`` is (x0, y0, x1, y1) as fractions of (W, H) and is the
+    fallback / single-zone choice. ``headline_candidate_boxes`` lets the
+    composer score several candidate zones and pick the cleanest one
+    (highest contrast, lowest texture/edge density). When ``avoid_busy_regions``
+    is True, candidate boxes are scored and ranked; otherwise the first
+    candidate (or ``headline_box``) is used directly.
     """
     model_config = ConfigDict(extra="ignore")
 
     headline_box: tuple[float, float, float, float] = (0.05, 0.65, 0.95, 0.95)
     text_align: TextAlign = TextAlign.CENTER
+
+    # Candidate boxes the composer can score (see avoid_busy_regions).
+    headline_candidate_boxes: list[tuple[float, float, float, float]] = Field(default_factory=list)
+    avoid_busy_regions: bool = False
+    # Optional per-aspect overrides for the scoring weights / threshold.
+    # When None, sensible defaults apply: busy=0.35, edges=0.45, precheck=3.0.
+    busy_region_penalty: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    object_overlap_penalty: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    min_contrast_precheck: Optional[float] = Field(default=None, gt=1.0, le=21.0)
+    # Per-aspect line-count constraints applied during headline fitting.
+    # The fitter prefers ``preferred_line_count`` (from typography per_aspect)
+    # but only accepts wraps with line counts in [min_line_count,
+    # max_line_count]. None = no constraint on that side.
+    min_line_count: Optional[int] = Field(default=None, ge=1, le=10)
+    max_line_count: Optional[int] = Field(default=None, ge=1, le=10)
 
     @field_validator("headline_box")
     @classmethod
@@ -174,6 +254,20 @@ class PerAspectLayout(BaseModel):
                 raise ValueError(f"headline_box coordinate {c} must be in [0, 1]")
         if x0 >= x1 or y0 >= y1:
             raise ValueError(f"headline_box must satisfy x0<x1 and y0<y1 (got {v})")
+        return v
+
+    @field_validator("headline_candidate_boxes")
+    @classmethod
+    def _candidate_boxes_valid(
+        cls, v: list[tuple[float, float, float, float]],
+    ) -> list[tuple[float, float, float, float]]:
+        for box in v:
+            x0, y0, x1, y1 = box
+            for c in box:
+                if not (0.0 <= c <= 1.0):
+                    raise ValueError(f"headline_candidate_boxes coord {c} must be in [0, 1]")
+            if x0 >= x1 or y0 >= y1:
+                raise ValueError(f"headline_candidate_box must satisfy x0<x1, y0<y1 (got {box})")
         return v
 
 
@@ -201,6 +295,60 @@ class LayoutTemplate(BaseModel):
     disclaimer_placement: DisclaimerPlacement = DisclaimerPlacement.UNDER_HEADLINE
     disclaimer_padding_pct: float = Field(default=0.025, ge=0.0, le=0.20)
 
+    # Local readability treatments — applied directly behind the rendered text
+    # (not as a global scrim). Composer paints a translucent rounded rectangle
+    # in the opposite-of-text-color so headlines/disclaimers stay readable
+    # over busy photography (striped towels, foliage, etc.) without resorting
+    # to a hard dark footer.
+    headline_background_treatment: HeadlineBackgroundTreatment = HeadlineBackgroundTreatment.NONE
+    headline_panel_opacity_pct: float = Field(default=0.55, ge=0.0, le=1.0)
+    headline_panel_padding_pct: float = Field(default=0.025, ge=0.0, le=0.20)
+    headline_panel_corner_radius_pct: float = Field(default=0.015, ge=0.0, le=0.50)
+    headline_text_shadow: bool = False
+    avoid_textured_regions: bool = False
+
+    disclaimer_background_treatment: DisclaimerBackgroundTreatment = DisclaimerBackgroundTreatment.NONE
+    disclaimer_badge_opacity_pct: float = Field(default=0.55, ge=0.0, le=1.0)
+    disclaimer_badge_padding_pct: float = Field(default=0.020, ge=0.0, le=0.20)
+    disclaimer_badge_corner_radius_pct: float = Field(default=0.015, ge=0.0, le=0.50)
+
+    # Ordered fallback chain when the composer's contrast estimate falls below
+    # brand.qc threshold. Empty list = no escalation (rely on what
+    # _choose_text_treatment already does + whatever explicit treatment is set).
+    readability_fallback_order: list[ReadabilityFallback] = Field(default_factory=list)
+
+    # Layout-level toggles for the candidate-headline scorer. When all three
+    # are off, the scorer treats every candidate purely on contrast/texture/
+    # edge density (existing behavior). When ``avoid_focal_overlap`` is on,
+    # the composer estimates a focal-area bbox and penalizes candidate boxes
+    # that overlap it by more than focal_area_padding_pct.
+    enable_candidate_headline_scoring: bool = True
+    avoid_busy_text_regions: bool = True
+    avoid_focal_overlap: bool = True
+    focal_area_padding_pct: float = Field(default=0.04, ge=0.0, le=0.50)
+    # Hard rejection caps applied as normalized fractions [0, 1]. A candidate
+    # whose normalized texture or edge score exceeds the cap is "non-viable"
+    # and is only chosen when no viable alternative exists.
+    text_region_max_edge_density: float = Field(default=0.18, ge=0.0, le=1.0)
+    text_region_max_texture_score: float = Field(default=0.55, ge=0.0, le=1.0)
+    # Penalty weight for candidate-vs-focal-area intersection (fraction of
+    # candidate area inside the focal safe zone).
+    focal_overlap_penalty_weight: float = Field(default=0.6, ge=0.0, le=2.0)
+
+    # Object-clearance / breathing-room around focal/product safe zone.
+    # ``object_text_clearance_pct`` is a fraction of min(W, H); the composer
+    # expands the focal safe zone by this much when scoring candidate boxes.
+    # ``min_text_object_gap_px`` is a per-aspect-ratio override in pixels
+    # (used by the candidate-shift logic). When a candidate falls inside
+    # the expanded zone, ``object_clearance_penalty`` is applied. When it
+    # falls inside the *unexpanded* focal safe zone AND
+    # ``hard_fail_text_object_collision`` is True, the candidate is marked
+    # non-viable (only chosen when no alternative exists).
+    object_text_clearance_pct: float = Field(default=0.035, ge=0.0, le=0.30)
+    min_text_object_gap_px: dict[str, int] = Field(default_factory=dict)
+    object_clearance_penalty: float = Field(default=0.65, ge=0.0, le=2.0)
+    hard_fail_text_object_collision: bool = True
+
     text_align_default: TextAlign = TextAlign.CENTER
     per_aspect: dict[str, PerAspectLayout] = Field(default_factory=dict)
 
@@ -222,6 +370,23 @@ class ImageryStyle(BaseModel):
     style_prompt_suffix: str
 
 
+class ImageCompositionGuidance(BaseModel):
+    """Brand-side photographic composition rules — fed to the image-gen prompt
+    so source photography ships with natural negative space for headline copy
+    instead of relying on visible composer panels."""
+    model_config = ConfigDict(extra="ignore")
+
+    negative_space_required: bool = False
+    # Per-aspect-ratio negative-space location, e.g. {"16x9": "left third"}.
+    negative_space_location_by_aspect: dict[str, str] = Field(default_factory=dict)
+    text_safe_area_prompt: str = ""
+    avoid_behind_text: list[str] = Field(default_factory=list)
+    preferred_behind_text: list[str] = Field(default_factory=list)
+    product_position_by_aspect: dict[str, str] = Field(default_factory=dict)
+    depth_of_field: str = ""
+    composition_style: str = ""
+
+
 class LegalRules(BaseModel):
     # English-language disclaimer rendered when localized_legal_copy=False on
     # the brief, regardless of market.
@@ -235,7 +400,8 @@ class LegalRules(BaseModel):
 class RequiredBrandChecks(BaseModel):
     palette_match: bool = True
     logo_presence: bool = True
-    contrast_ratio: bool = True   # WCAG headline-vs-background contrast QC
+    contrast_ratio: bool = True          # WCAG headline-vs-background contrast QC
+    disclaimer_contrast: bool = False    # WCAG disclaimer-vs-background contrast QC
 
 
 class QCRules(BaseModel):
@@ -245,6 +411,9 @@ class QCRules(BaseModel):
     min_contrast_ratio: float = Field(default=4.5, gt=1.0, le=21.0)
     large_text_min_ratio: float = Field(default=3.0, gt=1.0, le=21.0)
     large_text_size_threshold_px: int = Field(default=24, gt=0)
+    # Disclaimer contrast threshold (always treated as normal-text — small copy
+    # should not get the large-text relaxation, regardless of pixel size).
+    disclaimer_min_contrast_ratio: float = Field(default=4.5, gt=1.0, le=21.0)
 
 
 class BrandGuidelines(BaseModel):
@@ -263,6 +432,7 @@ class BrandGuidelines(BaseModel):
     required_brand_checks: RequiredBrandChecks = Field(default_factory=RequiredBrandChecks)
     qc: QCRules = Field(default_factory=QCRules)
     market_locales: dict[str, list[str]] = Field(default_factory=dict)
+    image_composition_guidance: Optional[ImageCompositionGuidance] = None
 
     # Palette guidance — applied during image generation. Brief can override.
     generation_palette_hint: Optional[str] = None

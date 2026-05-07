@@ -132,15 +132,22 @@ def test_brand_typography_loaded_from_yaml(brand_yaml):
 
 
 def test_changing_typography_in_yaml_changes_renderer(brand_yaml, brief_yaml, fake_hero, tmp_path):
-    """Bumping headline_size_ratio in the YAML should produce a measurably
-    larger headline render — proves the constant flows through."""
+    """Bumping headline_size_ratio (legacy global) should produce a measurably
+    larger headline render when no per-aspect typography overrides it.
+
+    The current brand YAML defines per_aspect entries that take precedence
+    over headline_size_ratio. We strip those overrides for this regression
+    test so the legacy code path is what's under test."""
+    legacy_brand = brand_yaml.model_copy(deep=True)
+    legacy_brand.typography.per_aspect = {}
+
     layout_small = LayoutTemplate(headline_size_ratio=0.05, scrim_padding_pct=0.04)
     layout_large = LayoutTemplate(headline_size_ratio=0.12, scrim_padding_pct=0.04)
 
     out_small = str(tmp_path / "small.png")
     out_large = str(tmp_path / "large.png")
-    compose_creative(fake_hero, "1x1", "Big bold headline that wraps", None, brand_yaml, layout_small, out_small)
-    compose_creative(fake_hero, "1x1", "Big bold headline that wraps", None, brand_yaml, layout_large, out_large)
+    compose_creative(fake_hero, "1x1", "Big bold headline that wraps", None, legacy_brand, layout_small, out_small)
+    compose_creative(fake_hero, "1x1", "Big bold headline that wraps", None, legacy_brand, layout_large, out_large)
 
     assert Path(out_small).stat().st_size != Path(out_large).stat().st_size
 

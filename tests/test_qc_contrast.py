@@ -290,6 +290,7 @@ def test_qc_agent_skips_when_no_rules_enabled(tmp_path):
     Image.new("RGB", (1080, 1080), (0, 0, 0)).save(img_path)
     brand = _brand_with_qc().model_copy(deep=True)
     brand.required_brand_checks.contrast_ratio = False
+    brand.required_brand_checks.disclaimer_contrast = False
     pid, state = _state_with_one_output(
         brand, {}, str(img_path), "#FFFFFF", [64, 700, 1016, 850],
     )

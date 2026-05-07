@@ -93,13 +93,16 @@ class ImageGeneratorAgent(BaseAgent):
         if product is None:
             raise RuntimeError(f"Product {self.product_id!r} not found in brief")
 
-        prompt = build_prompt(product, brief, brand)
         out_path, sidecar_path, ts = _source_paths(self.product_id)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Hero generated at the first declared aspect ratio (default 1x1).
         hero_aspect = next(iter(brand.aspect_ratios.keys()), "1x1")
         hero_aspect_api = hero_aspect.replace("x", ":")
+
+        # Pass the hero aspect-ratio label so the prompt can pull the matching
+        # per-aspect product position + negative-space guidance.
+        prompt = build_prompt(product, brief, brand, hero_aspect_ratio_label=hero_aspect)
 
         # OpenAI quality knob is sourced from creative_quality. We thread it via env
         # because the tool function signature is shared across providers; the openai

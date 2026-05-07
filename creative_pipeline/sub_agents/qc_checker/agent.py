@@ -107,6 +107,12 @@ class QCCheckerAgent(BaseAgent):
                     qc_block["text_color"] = r["details"].get("text_color")
                     qc_block["background_color"] = r["details"].get("background_color")
                     qc_block["headline_box"] = r["details"].get("headline_box")
+                elif r["name"] == "disclaimer_contrast":
+                    # No disclaimer rendered → details may be empty.
+                    if r["details"]:
+                        qc_block["disclaimer_contrast_ratio"] = r["details"].get("contrast_ratio")
+                        qc_block["disclaimer_wcag_level"] = r["details"].get("wcag_level")
+                        qc_block["disclaimer_background_color"] = r["details"].get("background_color")
 
             new_out = {**out, "qc_check": qc_block}
             annotated.append(new_out)

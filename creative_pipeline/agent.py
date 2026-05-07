@@ -20,6 +20,7 @@ from creative_pipeline.sub_agents.brand_checker.agent import BrandCheckerAgent
 from creative_pipeline.sub_agents.brand_loader import brand_loader_agent
 from creative_pipeline.sub_agents.brief_parser import brief_parser_agent
 from creative_pipeline.sub_agents.creative_composer.agent import CreativeComposerAgent
+from creative_pipeline.sub_agents.dropbox_uploader import dropbox_uploader_agent
 from creative_pipeline.sub_agents.image_generator.agent import ImageGeneratorAgent
 from creative_pipeline.sub_agents.legal_checker.agent import LegalCheckerAgent
 from creative_pipeline.sub_agents.qc_checker.agent import QCCheckerAgent
@@ -60,10 +61,18 @@ if _product_ids:
         name="per_product",
         sub_agents=[_product_pipeline(pid) for pid in _product_ids],
     )
-    root_sub_agents = [brand_loader_agent, brief_parser_agent, per_product, reporter_agent]
+    root_sub_agents = [
+        brand_loader_agent, brief_parser_agent, per_product,
+        reporter_agent, dropbox_uploader_agent,
+    ]
 else:
     # Empty brief — still let `adk web` boot so the user can fix the path.
-    root_sub_agents = [brand_loader_agent, brief_parser_agent, reporter_agent]
+    # Dropbox uploader stays in the chain (it's a no-op when disabled and
+    # also a no-op when there's no report_path in state).
+    root_sub_agents = [
+        brand_loader_agent, brief_parser_agent,
+        reporter_agent, dropbox_uploader_agent,
+    ]
 
 root_agent = SequentialAgent(
     name="creative_pipeline",

@@ -41,6 +41,17 @@ In the agent dropdown, pick **`creative_pipeline`** and send any message — the
 
 CLI alternative: `uv run adk run creative_pipeline`.
 
+### Run modes
+
+| Mode | Command | When to use |
+|---|---|---|
+| **Live demo** | `uv run adk web .` | Live walkthrough — chat with the agent, watch each step stream in the ADK UI. |
+| **CLI / interactive** | `uv run adk run creative_pipeline` | Same orchestration, terminal output. |
+| **Batch / CI / one-shot** | `.venv/bin/python scripts/run_pipeline.py` | Headless, no UI. Prints `REPORT: outputs/report_*.json` and exits. |
+| **Batch + Dropbox snapshot** | `.venv/bin/python scripts/run_pipeline.py --upload-dropbox` | Above + optional post-run upload of `outputs/` to a team-shared Dropbox folder. See § *Optional Dropbox Upload*. |
+
+The `scripts/run_pipeline.py` driver also supports `--dropbox-shared-links` (best-effort public links for `report_*.json` and gallery files) and `--dropbox-root <path>` (override the default `/TD-Creative-Pipeline-POC` destination). Each flag has an env-var equivalent.
+
 ### Provider Swap
 
 The agent LLM (driven through LiteLLM) and the image-gen backend are independently swappable via env vars:
@@ -289,6 +300,142 @@ The composer then runs a small ordered escalation when its contrast estimate fal
 
 In the demo run, `aquavita_sparkling` outputs render white headline text on a darkened gradient and score **5.4:1** (WCAG AA pass). `sunguard_spf50` outputs render the navy headline on a tan beach-towel background and score **3.24:1**. The QC system reports this as **AA-large pass** rather than failure: WCAG 2.1 sets the AA threshold at **3.0:1 for large text** (≥18pt or ≥14pt bold) and our headline runs ~60–70px at 1080-tall canvas — well within the demo's configured large-text threshold. The result is technically WCAG-compliant for headline copy, but it sits well below the 4.5:1 normal-text bar, so the system surfaces it as a *visible signal* (`wcag_level: "AA-large"`, `contrast_ratio: 3.24`) rather than a silent pass. A brand that wants stricter copy for body or sub-headline use just bumps `min_contrast_ratio` to 7.0 (AAA) or sets `halt_on_qc_failure: true` to refuse to ship borderline creatives — no code change required.
 
+## Optional Dropbox Upload
+
+The pipeline writes all artifacts to local `outputs/` first — that remains the source of truth. The Dropbox upload step is an **opt-in** post-run snapshot for sharing run artifacts with reviewers who don't have filesystem access to the runner host. It runs as the final agent in the graph (`DropboxUploaderAgent`, after `ReportingAgent`), so **`adk web`, `adk run`, and `scripts/run_pipeline.py` all support upload** through the same code path. A missing token / SDK / config issue never affects the local run — the agent records the failure in state and yields a "skipped" event instead of raising.
+
+### Setup
+
+1. **Create a Dropbox app** at <https://www.dropbox.com/developers/apps/create>. The "Permission type" you pick at creation time matters — see the next subsection.
+2. **Generate an access token** (App Console → your app → Settings → "Generated access token" → Generate). Tokens starting with `sl.u.A…` are short-lived (~4 hours) and work fine for POC demos. For unattended runs, use the OAuth refresh-token flow.
+3. **Add it to `.env`**:
+
+   ```
+   DROPBOX_ACCESS_TOKEN=sl.u.xxxx...
+   ```
+
+   `.env` is already in `.gitignore` — don't commit it.
+
+4. **Install the SDK** (optional `[upload]` extra; local runs don't need it):
+
+   ```bash
+   pip install -e .[upload]
+   # or
+   uv sync --extra upload
+   ```
+
+#### App Folder vs Full Dropbox — pick the right `DROPBOX_ROOT_FOLDER`
+
+This is the most common gotcha. The path your files land at in Dropbox depends on the **Permission type** you picked when creating the app. You can see it in the App Console under your app's Settings tab.
+
+| Permission type | Where files actually land in Dropbox | Set `DROPBOX_ROOT_FOLDER` to | Trade-off |
+|---|---|---|---|
+| **Scoped App (App Folder)** | `/Apps/<your_app_name>/<paths from API>` — sandboxed | **`/`** (so paths start at the sandbox root, no doubled folder name) | Tightest scope; app can only access its own folder |
+| **Scoped App (Full Dropbox)** | `<API path>` — at the root of the user's Dropbox | **`/TD-Creative-Pipeline-POC`** (or any absolute path you choose) | Broader scope; app can read/write the user's whole Dropbox |
+
+**Why this matters:** if you have an App Folder app AND set `DROPBOX_ROOT_FOLDER=/TD-Creative-Pipeline-POC`, every upload lands at `/Apps/TD-Creative-Pipeline-POC/TD-Creative-Pipeline-POC/<rest>` — the app-folder name shows up **twice** because the sandbox already prefixes it. Setting `DROPBOX_ROOT_FOLDER=/` avoids that.
+
+**Which to pick:** App Folder is the safer default for a POC. If you go this route, find your files at <https://www.dropbox.com/home/Apps> in the Dropbox web UI — they won't appear at the dropbox root because the sandbox isn't there.
+
+### Usage
+
+The `DropboxUploaderAgent` reads three env vars. The CLI flags on `scripts/run_pipeline.py` are convenience shortcuts — they just translate into the same env vars before the agent graph runs, so `adk web` and `scripts/run_pipeline.py` share one upload code path.
+
+| Env var | CLI shortcut on `run_pipeline.py` | Default |
+|---|---|---|
+| `DROPBOX_UPLOAD_ENABLED=true` | `--upload-dropbox` | off |
+| `DROPBOX_ROOT_FOLDER=<path>` | `--dropbox-root <path>` | `/TD-Creative-Pipeline-POC` |
+| `DROPBOX_CREATE_SHARED_LINKS=true` | `--dropbox-shared-links` | off |
+| `DROPBOX_UPLOAD_PARALLELISM=<n>` | *(no flag — only via `.env`)* | `8` |
+| `DROPBOX_ACCESS_TOKEN=<sl.u…>` | *(no flag — only via `.env`)* | — |
+
+`DROPBOX_UPLOAD_PARALLELISM` controls how many uploads run concurrently. Default `8` turns the previous ~47 s serial upload (23 files × ~2 s/file) into ~6 s parallel. Set to `1` for strictly-serial behavior (useful when debugging rate-limiting).
+
+**`adk web` / `adk run`** (live demo or interactive CLI):
+
+```bash
+# Add to .env once:
+echo "DROPBOX_UPLOAD_ENABLED=true" >> .env
+
+# Then runs through adk upload automatically:
+uv run adk web .
+```
+
+**`scripts/run_pipeline.py`** (batch / CI), per-invocation flags or env:
+
+```bash
+# Default — no upload, identical to today.
+.venv/bin/python scripts/run_pipeline.py
+
+# Upload outputs/ snapshot to Dropbox (one-shot via flag).
+.venv/bin/python scripts/run_pipeline.py --upload-dropbox
+
+# Upload + create public shared links for report/gallery files.
+.venv/bin/python scripts/run_pipeline.py --upload-dropbox --dropbox-shared-links
+
+# Upload to a custom Dropbox folder (defaults to /TD-Creative-Pipeline-POC).
+.venv/bin/python scripts/run_pipeline.py --upload-dropbox \
+    --dropbox-root /TD-Creative-Pipeline-POC
+```
+
+### Where files land
+
+The API-side path is always:
+
+```
+<DROPBOX_ROOT_FOLDER>/<campaign_id>/<run_timestamp>/<same tree as outputs/>
+```
+
+The Dropbox-side path depends on whether you have an App Folder or Full Dropbox app.
+
+**App Folder app** (with `DROPBOX_ROOT_FOLDER=/`):
+
+```
+/Apps/TD-Creative-Pipeline-POC/        ← app sandbox
+└── summer_refresh_2025/                 ← from <campaign_id>
+    └── 20260507T172946Z/                ← from <run_timestamp>
+        ├── report_20260507T172946Z.json
+        ├── aquavita_sparkling/
+        │   ├── 1x1/MX_es.png  9x16/MX_es.png  16x9/MX_es.png  ...
+        │   └── source/global_*.png   global_*.json
+        └── sunguard_spf50/
+            └── ...
+```
+
+**Full Dropbox app** (with `DROPBOX_ROOT_FOLDER=/TD-Creative-Pipeline-POC`):
+
+```
+/TD-Creative-Pipeline-POC/               ← at the root of the user's Dropbox
+└── summer_refresh_2025/
+    └── 20260507T172946Z/
+        └── ...
+```
+
+The uploader walks the local `outputs/` tree, includes only `.png` / `.json` / `.html` files, and skips hidden files (`.gitkeep`, `.DS_Store`, `.adk/...`, `.env`), `__pycache__`, and prior `dropbox_upload_*.json` manifests.
+
+### Verifying an upload
+
+After a run with `--upload-dropbox`, a local manifest is written to:
+
+```
+outputs/dropbox_upload_<run_timestamp>.json
+```
+
+It records `campaign_id`, `run_timestamp`, `dropbox_run_folder`, `uploaded_count`, every uploaded file's local + Dropbox path, any `failures`, and `shared_links` if requested. The runner also prints a one-line summary like:
+
+```
+DROPBOX_UPLOAD: enabled=true folder=/TD-Creative-Pipeline-POC/summer_refresh_2025/20260507T172946Z files=19 failures=0
+DROPBOX_MANIFEST: outputs/dropbox_upload_20260507T172946Z.json
+```
+
+The token never appears in logs, the manifest, or any returned metadata.
+
+### Notes
+
+- Per-file upload failures are recorded in the manifest and don't abort the run — partial uploads are still useful.
+- Files larger than Dropbox's 150 MB simple-upload limit are flagged as failures; chunked upload sessions are a TODO (POC files are well under).
+- Tests use a `FakeDropbox` class — the test suite never calls the real Dropbox API.
+
 ## Architecture
 
 ```
@@ -304,7 +451,10 @@ root_agent (SequentialAgent)
   │           ├── BrandCheckerAgent      palette + cv2 template match
   │           ├── LegalCheckerAgent      disclaimer-rendered post-check
   │           └── QCCheckerAgent         final-render contrast/readability QC
-  └── ReportingAgent             aggregates state → outputs/report_*.json
+  ├── ReportingAgent             aggregates state → outputs/report_*.json
+  └── DropboxUploaderAgent       optional snapshot of outputs/ to Dropbox
+                                 (no-op when DROPBOX_UPLOAD_ENABLED unset;
+                                 never raises — failures land in state instead)
 ```
 
 ## Key Design Decisions
@@ -313,7 +463,7 @@ root_agent (SequentialAgent)
 2. **Parallel-per-product fan-out.** Each product runs its own sequential sub-pipeline inside a `ParallelAgent`, so two products generate concurrently. Per-product state lives at flat keys `state["product:{pid}"]` to avoid races on a shared nested dict.
 3. **Asset caching for idempotency and cost control.** `inputs/assets/{pid}/hero.png` is the cache; both the asset manager and the image generator's activation gate respect it. Re-running with cached heroes skips the LLM and the image API entirely.
 4. **Compliance separated from generation.** Legal pre-check fires as a `before_model_callback` on the image generator's LLM call so prohibited words can never reach the image-gen API. Brand check is deterministic palette + template-match (not an LLM judgement) — fast, predictable, auditable.
-5. **Storage abstracted behind an interface.** [storage_adapter.py](creative_pipeline/tools/storage_adapter.py) defines the boundary. The PoC ships only `LocalStorageAdapter`; cloud adapters (S3/GCS/Azure/Dropbox) slot in here.
+5. **Storage abstracted behind an interface, plus an optional out-of-band uploader.** [storage_adapter.py](creative_pipeline/tools/storage_adapter.py) defines the per-write storage boundary used by every agent that persists state — `LocalStorageAdapter` is the only adapter the POC ships, and S3/GCS/Azure adapters would slot in alongside it. The Dropbox upload is intentionally **not** wired through that interface — it's a *post-run snapshot* step that walks the finished `outputs/` tree and mirrors the relevant artifacts to a team-shared Dropbox folder. Keeping it out of the per-write hot path means a Dropbox outage can't fail an in-flight run, the SDK stays an optional `[upload]` extra, and the agents keep treating the local filesystem as the single source of truth. See § *Optional Dropbox Upload*.
 6. **LiteLLM provider swap + parallel image-gen track.** The agent LLM and the image-gen backend are decoupled and individually swappable via `PROVIDER` / `IMAGE_PROVIDER` — see the matrix above.
 
 ## Assumptions and Limitations
@@ -351,3 +501,4 @@ Recorded against `adk web`; covers cold-start image generation, cache reuse on r
 - **WCAG-style final-render QC.** `QCCheckerAgent` opens the rendered PNG, samples the actual background under the headline box (filtering out text pixels), and computes a WCAG 2.x-style contrast ratio against the rendered text color. This is a final-render readability check, not a full accessibility certification — but it catches the failure modes (busy backgrounds, color drift) that visual review would otherwise have to find by eye.
 - **The SunGuard AA-large nuance.** Navy headline on tan beach-towel background scored 3.24:1. Rather than silently passing or hard-failing, the system surfaced `wcag_level: "AA-large"` so a reviewer can see exactly what they are accepting. A brand that wants stricter copy bumps `min_contrast_ratio` or sets `halt_on_qc_failure: true` — no code change.
 - **Modular future QC rules.** `tools/qc_rules.py:build_rules(brand)` builds the active rule list from brand flags. Adding a new rule (minimum font size, focal-area collision, brand-color saturation in headline region, etc.) is a new `QCRule` subclass plus a flag in `RequiredBrandChecks` — `QCCheckerAgent` already iterates whatever `build_rules` returns.
+- **Optional Dropbox snapshot — local outputs always win.** `scripts/run_pipeline.py --upload-dropbox` mirrors the run's `outputs/` to `/TD-Creative-Pipeline-POC/<campaign_id>/<run_timestamp>/` after the pipeline finishes. The Dropbox SDK is an opt-in `[upload]` extra so default installs stay slim; the access token is read from `.env`, never logged, never echoed in metadata, and the upload runs **after** the pipeline so a Dropbox outage can't fail a local run. A `dropbox_upload_<ts>.json` manifest lands next to `report_<ts>.json` listing every uploaded file and any per-file failures, plus optional shared links when `--dropbox-shared-links` is passed. See § *Optional Dropbox Upload*.

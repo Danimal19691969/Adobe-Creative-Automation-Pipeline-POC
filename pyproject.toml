@@ -22,6 +22,12 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.5",
 ]
+# Install with `pip install -e .[upload]` (or `uv sync --extra upload`) to
+# enable the optional Dropbox post-run snapshot uploader. Local pipeline
+# runs don't need this extra — it only ships when you actually upload.
+upload = [
+    "dropbox>=11.36",
+]
 
 [build-system]
 requires = ["hatchling"]

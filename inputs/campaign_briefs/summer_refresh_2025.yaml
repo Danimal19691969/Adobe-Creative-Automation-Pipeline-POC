@@ -1,7 +1,7 @@
 campaign_id: summer_refresh_2025
 campaign_name: Summer Refresh 2025
 brand_id: aquacorp_global
-language: es # choose language es (spanish), en (english), or pt (portuguese) for this campaign. This will influence the language of the generated copy and any region-specific cultural cues in the imagery.
+language: en # choose language es (spanish), en (english), or pt (portuguese) for this campaign. This will influence the language of the generated copy and any region-specific cultural cues in the imagery.
 localized_copy: false
 localized_legal_copy: false
 force_generate_hero: true

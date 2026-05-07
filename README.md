@@ -26,31 +26,125 @@ A global consumer-goods brand launches hundreds of localized social campaigns pe
 
 ## Quick Start
 
-**Prerequisites:** Python 3.11+, [uv](https://docs.astral.sh/uv/) (or pip), and an API key for whichever provider you choose.
+**Prerequisites:** Python 3.11+, [uv](https://docs.astral.sh/uv/) (or pip), an API key for whichever image-gen provider you'll use (default OpenAI), and a Dropbox developer app + token. Setup details below.
+
+### One-time setup
 
 ```bash
+# 1. Clone & install (with the Dropbox upload extra; ~30 s).
 git clone <repo-url> creative-pipeline
 cd creative-pipeline
-uv sync                              # or: pip install -e .[dev]
-bash scripts/fetch_fonts.sh          # downloads Montserrat-Bold + OpenSans-Regular
-cp .env.example .env                 # then fill in OPENAI_API_KEY (default provider)
-uv run adk web .                     # opens http://127.0.0.1:8000
+uv sync --extra upload               # core deps + dropbox SDK
+                                     # (drop --extra upload if you'll never upload)
+
+# 2. Download the brand fonts (~5 s).
+bash scripts/fetch_fonts.sh          # Montserrat-Bold + OpenSans-Regular
+
+# 3. Create your .env from the template and fill in real values.
+cp .env.example .env
+# then edit .env — see § "Environment setup" below for every key.
 ```
 
-In the agent dropdown, pick **`creative_pipeline`** and send any message — the message text is ignored, the pipeline kicks off regardless. Watch [outputs/](outputs/) populate. The first run on missing heroes calls the image-gen API; subsequent runs reuse the cached `inputs/assets/{product_id}/hero.png` and the pipeline finishes near-instantly.
+### Standard demo run — recommended path
 
-CLI alternative: `uv run adk run creative_pipeline`.
+The full demo is one command. It reads the default brief + brand guidelines, generates or rerenders all creatives, writes `outputs/report_*.json`, and uploads the finished batch to Dropbox (assuming your `.env` has `DROPBOX_UPLOAD_ENABLED=true` and a valid `DROPBOX_ACCESS_TOKEN`).
+
+```bash
+.venv/bin/python scripts/run_pipeline.py
+```
+
+What happens:
+- Reads `inputs/brand/guidelines.yaml` and `inputs/campaign_briefs/summer_refresh_2025.yaml`.
+- Runs the agent graph (asset cache check → image gen → composition → brand / legal / QC checks → reporter → Dropbox uploader).
+- Writes per-product PNGs under `outputs/{product_id}/{ratio}/{market}_{locale}.png` and the run report at `outputs/report_<ts>.json`.
+- Snapshots the finished `outputs/` tree to Dropbox.
+- Prints two summary lines at the end:
+
+```
+REPORT: outputs/report_20260507T184413Z.json
+DROPBOX_UPLOAD: enabled=true folder=/runs/summer_refresh_2025/20260507T184413Z files=23 failures=0
+DROPBOX_MANIFEST: outputs/dropbox_upload_20260507T184413Z.json
+```
+
+In your Dropbox the run lands at:
+
+```
+Dropbox / Apps / TD-Creative-Pipeline-POC / runs / summer_refresh_2025 / <run_timestamp> /
+```
+
+(The `Apps/TD-Creative-Pipeline-POC/` segment is the App Folder sandbox; the `/runs/` segment comes from `DROPBOX_ROOT_FOLDER` in your `.env`. See [§ Optional Dropbox Upload](#optional-dropbox-upload) if you're using a Full-Dropbox app instead.)
+
+The first run hits the image-gen API (~30-90 s per hero). Subsequent runs reuse the cached source heroes and finish in ~10 s of compute + ~6 s of parallel upload.
+
+### Fresh run / force new hero images
+
+When you want to demo *fresh* image generation rather than re-rendering against cached heroes — e.g. before a stakeholder demo, or after changing the brief / brand prompt — clear the local artifact caches first:
+
+```bash
+cd ~/Code/TD-Creative-Pipeline-POC
+
+rm -rf outputs/*
+touch outputs/.gitkeep
+rm -rf .adk/artifacts/*
+
+# Verify the brief is configured to actually force regeneration:
+grep -n "force_generate_hero\|regenerate_cached_assets" inputs/campaign_briefs/summer_refresh_2025.yaml
+# Expected output:
+#   7:force_generate_hero: true
+#   8:regenerate_cached_assets: true
+
+# Now run normally — image gen will fire because both flags are true.
+.venv/bin/python scripts/run_pipeline.py
+```
+
+Why each step:
+- `rm -rf outputs/*` removes prior renders, source heroes, sidecar JSON, and any stale Dropbox upload manifests.
+- `touch outputs/.gitkeep` keeps the directory tracked by git after the wipe.
+- `rm -rf .adk/artifacts/*` clears the ADK runtime's per-session artifact cache (separate from `outputs/`).
+- The `grep` confirms the brief's two re-generation flags are on. If either reads `false`, the asset manager will reuse `inputs/assets/<product>/hero.png` instead of calling the image-gen API. Toggling them in the YAML is how you choose between "demo with cached heroes" and "demo fresh image gen".
+
+### Environment setup
+
+`.env` lives at the project root and is read with `override=True`, so values there beat anything in your shell. **`.env` is in `.gitignore` — do not commit it.** `.env.example` is the committed template; it contains only placeholders.
+
+Minimum keys the standard run needs:
+
+```ini
+# 1. Image-gen provider — pick ONE provider and fill in its key.
+PROVIDER=openai
+MODEL=gpt-5
+IMAGE_PROVIDER=openai
+IMAGE_MODEL=gpt-image-1
+OPENAI_API_KEY=sk-...
+
+# 2. Dropbox upload — required for the standard demo run.
+DROPBOX_ACCESS_TOKEN=your_token_here
+DROPBOX_UPLOAD_ENABLED=true
+DROPBOX_ROOT_FOLDER=/runs
+DROPBOX_CREATE_SHARED_LINKS=false
+DROPBOX_UPLOAD_PARALLELISM=8
+```
+
+`DROPBOX_ACCESS_TOKEN` and the scopes on your Dropbox app are the most common failure points — see [§ Optional Dropbox Upload](#optional-dropbox-upload) for setup, scope requirements, and troubleshooting. The pipeline does a preflight check at startup that catches expired tokens or missing scopes before image generation begins.
+
+Other providers (Google / Anthropic) are configured in [§ Provider Swap](#provider-swap).
 
 ### Run modes
 
-| Mode | Command | When to use |
+| Mode | Command | Use |
 |---|---|---|
-| **Live demo** | `uv run adk web .` | Live walkthrough — chat with the agent, watch each step stream in the ADK UI. |
-| **CLI / interactive** | `uv run adk run creative_pipeline` | Same orchestration, terminal output. |
-| **Batch / CI / one-shot** | `.venv/bin/python scripts/run_pipeline.py` | Headless, no UI. Prints `REPORT: outputs/report_*.json` and exits. |
-| **Batch + Dropbox snapshot** | `.venv/bin/python scripts/run_pipeline.py --upload-dropbox` | Above + optional post-run upload of `outputs/` to a team-shared Dropbox folder. See § *Optional Dropbox Upload*. |
+| **Standard demo run** | `.venv/bin/python scripts/run_pipeline.py` | **Recommended path.** Runs pipeline, writes `outputs/`, uploads to Dropbox when enabled in `.env`. |
+| **Fresh image-generation run** | `rm -rf outputs/* && touch outputs/.gitkeep && rm -rf .adk/artifacts/* && .venv/bin/python scripts/run_pipeline.py` | Use when you want brand-new hero images instead of cached/re-rendered outputs. See § *Fresh run / force new hero images* above for the verify-YAML step. |
+| **ADK Web** (advanced/debug) | `uv run adk web .` | Visual ADK orchestration in a browser. Use when debugging the multi-agent flow or doing a live walkthrough. **Not the recommended demo path.** See [§ Advanced / Debugging](#advanced--debugging). |
+| **ADK interactive terminal** (advanced) | `uv run adk run creative_pipeline` | Same orchestration as ADK Web, terminal output. |
 
-The `scripts/run_pipeline.py` driver also supports `--dropbox-shared-links` (best-effort public links for `report_*.json` and gallery files) and `--dropbox-root <path>` (override the default `/TD-Creative-Pipeline-POC` destination). Each flag has an env-var equivalent.
+When `DROPBOX_UPLOAD_ENABLED=true` is set in `.env`, every mode above uploads to Dropbox automatically (the upload runs as the final step in the agent graph). For one-off forcing without editing `.env`, `scripts/run_pipeline.py --upload-dropbox` overrides any `DROPBOX_UPLOAD_ENABLED=false` and uploads anyway. The reverse one-off (skip upload despite `.env`) is a manual `unset DROPBOX_UPLOAD_ENABLED` before the run.
+
+### Verify your install
+
+```bash
+.venv/bin/python -m pytest -q        # 281 tests; ~25 s
+```
 
 ### Provider Swap
 
@@ -302,27 +396,67 @@ In the demo run, `aquavita_sparkling` outputs render white headline text on a da
 
 ## Optional Dropbox Upload
 
-The pipeline writes all artifacts to local `outputs/` first — that remains the source of truth. The Dropbox upload step is an **opt-in** post-run snapshot for sharing run artifacts with reviewers who don't have filesystem access to the runner host. It runs as the final agent in the graph (`DropboxUploaderAgent`, after `ReportingAgent`), so **`adk web`, `adk run`, and `scripts/run_pipeline.py` all support upload** through the same code path. A missing token / SDK / config issue never affects the local run — the agent records the failure in state and yields a "skipped" event instead of raising.
+The standard demo run uploads to Dropbox automatically when `.env` has `DROPBOX_UPLOAD_ENABLED=true` and a valid `DROPBOX_ACCESS_TOKEN`. This section is the deep-dive reference: app setup, scope requirements, the App Folder vs Full Dropbox distinction, and troubleshooting. For the minimum-config runbook, see [§ Quick Start — Environment setup](#environment-setup).
+
+The pipeline writes all artifacts to local `outputs/` first — **that remains the source of truth.** Dropbox is a post-run snapshot. The upload step is the final agent in the graph (`DropboxUploaderAgent`, after `ReportingAgent`), so `scripts/run_pipeline.py`, `adk run`, and `adk web` all upload through one code path. A missing token / SDK / scope / network issue never affects the local run — the agent records the failure in state and yields a "skipped" event instead of raising.
+
+You can still **force upload from the CLI** even when `DROPBOX_UPLOAD_ENABLED=false` (or unset) in `.env`:
+
+```bash
+.venv/bin/python scripts/run_pipeline.py --upload-dropbox
+```
+
+The flag wins over the env var for that one invocation. There's also `--dropbox-shared-links` (best-effort public links for `report_*.json` and any gallery files) and `--dropbox-root <path>` (override `DROPBOX_ROOT_FOLDER`).
 
 ### Setup
 
-1. **Create a Dropbox app** at <https://www.dropbox.com/developers/apps/create>. The "Permission type" you pick at creation time matters — see the next subsection.
-2. **Generate an access token** (App Console → your app → Settings → "Generated access token" → Generate). Tokens starting with `sl.u.A…` are short-lived (~4 hours) and work fine for POC demos. For unattended runs, use the OAuth refresh-token flow.
-3. **Add it to `.env`**:
+1. **Create a Dropbox app** at <https://www.dropbox.com/developers/apps/create>. The "Permission type" you pick at creation time matters — see [App Folder vs Full Dropbox](#app-folder-vs-full-dropbox--pick-the-right-dropbox_root_folder) below.
 
-   ```
+2. **Enable the required scopes** on the App Console → your app → **Permissions** tab:
+
+   | Scope | Purpose | Required? |
+   |---|---|---|
+   | `account_info.read` | Token validation (preflight) | **Yes** |
+   | `files.content.write` | Upload + delete files | **Yes — this is the one most people forget** |
+   | `sharing.write` | Public shared links | Only if you'll use `--dropbox-shared-links` |
+   | `files.content.read` | Read uploaded files (future-proofing) | Recommended |
+
+   Click **Submit** at the bottom. **Critical:** changing scopes invalidates existing tokens, so do this BEFORE generating a token.
+
+3. **Generate an access token** (Settings tab → "Generated access token" → Generate). Tokens starting with `sl.u.A…` are short-lived (~4 hours) and work fine for POC demos. For unattended runs, use the OAuth refresh-token flow (not implemented in this POC).
+
+4. **Add it to `.env`** along with the upload toggle:
+
+   ```ini
    DROPBOX_ACCESS_TOKEN=sl.u.xxxx...
+   DROPBOX_UPLOAD_ENABLED=true
+   DROPBOX_ROOT_FOLDER=/             # see App Folder vs Full Dropbox below
    ```
 
    `.env` is already in `.gitignore` — don't commit it.
 
-4. **Install the SDK** (optional `[upload]` extra; local runs don't need it):
+5. **Install the SDK** (optional `[upload]` extra; local runs don't need it):
 
    ```bash
-   pip install -e .[upload]
-   # or
    uv sync --extra upload
+   # or
+   pip install -e .[upload]
    ```
+
+#### Preflight check at startup
+
+When `DROPBOX_UPLOAD_ENABLED=true`, both `scripts/run_pipeline.py` and the `DropboxUploaderAgent` (used by `adk web`) run a preflight check **before** the pipeline burns minutes on image generation:
+
+- ping `users/get_current_account` → catches expired or invalid tokens
+- write a 1-byte sentinel file to `<DROPBOX_ROOT_FOLDER>/_preflight_<hex>.txt` and immediately delete it → catches missing `files.content.write` scope (the most common Dropbox-app misconfiguration)
+
+On success you'll see:
+
+```
+DROPBOX_PREFLIGHT: valid (account: you@example.com); write scope OK
+```
+
+On failure you get a loud warning naming the exact missing scope or the expired-token error, with a link to the App Console. The pipeline still runs — the local `outputs/` are unaffected — and the per-file error is recorded in the upload manifest.
 
 #### App Folder vs Full Dropbox — pick the right `DROPBOX_ROOT_FOLDER`
 
@@ -380,32 +514,35 @@ uv run adk web .
 
 ### Where files land
 
-The API-side path is always:
+The API-side path the uploader sends to Dropbox is always:
 
 ```
 <DROPBOX_ROOT_FOLDER>/<campaign_id>/<run_timestamp>/<same tree as outputs/>
 ```
 
-The Dropbox-side path depends on whether you have an App Folder or Full Dropbox app.
+The actual on-disk location in your Dropbox depends on whether your app is App Folder–scoped or Full Dropbox–scoped.
 
-**App Folder app** (with `DROPBOX_ROOT_FOLDER=/`):
-
-```
-/Apps/TD-Creative-Pipeline-POC/        ← app sandbox
-└── summer_refresh_2025/                 ← from <campaign_id>
-    └── 20260507T172946Z/                ← from <run_timestamp>
-        ├── report_20260507T172946Z.json
-        ├── aquavita_sparkling/
-        │   ├── 1x1/MX_es.png  9x16/MX_es.png  16x9/MX_es.png  ...
-        │   └── source/global_*.png   global_*.json
-        └── sunguard_spf50/
-            └── ...
-```
-
-**Full Dropbox app** (with `DROPBOX_ROOT_FOLDER=/TD-Creative-Pipeline-POC`):
+**App Folder app** with `DROPBOX_ROOT_FOLDER=/runs` (the recommended setup; matches the env in [§ Quick Start](#environment-setup)):
 
 ```
-/TD-Creative-Pipeline-POC/               ← at the root of the user's Dropbox
+/Apps/TD-Creative-Pipeline-POC/                ← app sandbox (auto-created on first upload)
+└── runs/                                       ← from DROPBOX_ROOT_FOLDER
+    └── summer_refresh_2025/                    ← from <campaign_id>
+        └── 20260507T172946Z/                   ← from <run_timestamp>
+            ├── report_20260507T172946Z.json
+            ├── aquavita_sparkling/
+            │   ├── 1x1/MX_es.png  9x16/MX_es.png  16x9/MX_es.png  ...
+            │   └── source/global_*.png   global_*.json
+            └── sunguard_spf50/
+                └── ...
+```
+
+If you set `DROPBOX_ROOT_FOLDER=/` instead, the `runs/` segment disappears and runs land directly under `/Apps/TD-Creative-Pipeline-POC/<campaign_id>/<run_timestamp>/`.
+
+**Full Dropbox app** with `DROPBOX_ROOT_FOLDER=/TD-Creative-Pipeline-POC`:
+
+```
+/TD-Creative-Pipeline-POC/                     ← at the root of the user's Dropbox
 └── summer_refresh_2025/
     └── 20260507T172946Z/
         └── ...
@@ -434,7 +571,19 @@ The token never appears in logs, the manifest, or any returned metadata.
 
 - Per-file upload failures are recorded in the manifest and don't abort the run — partial uploads are still useful.
 - Files larger than Dropbox's 150 MB simple-upload limit are flagged as failures; chunked upload sessions are a TODO (POC files are well under).
+- Uploads run in parallel (default 8 concurrent threads) so a 23-file run completes in ~6 s instead of ~47 s. Tune via `DROPBOX_UPLOAD_PARALLELISM`; set `=1` if Dropbox rate-limits you.
 - Tests use a `FakeDropbox` class — the test suite never calls the real Dropbox API.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `DROPBOX_PREFLIGHT WARNING: invalid: AuthError(...invalid_access_token...)` | Token expired (`sl.u.A…` tokens last ~4 h) | Regenerate at App Console → Settings → "Generated access token". |
+| `DROPBOX_PREFLIGHT WARNING: write check failed (...) BadInputError(...files.content.write...)` | Token authenticates but missing the write scope | App Console → Permissions tab → tick `files.content.write` → Submit → **regenerate the token** (scope changes invalidate old tokens). |
+| `Dropbox upload skipped (DROPBOX_UPLOAD_ENABLED is not set)` | The opt-in flag isn't on | Add `DROPBOX_UPLOAD_ENABLED=true` to `.env` or pass `--upload-dropbox` to `scripts/run_pipeline.py`. |
+| Files uploaded but you can't find them at `dropbox.com/home/TD-Creative-Pipeline-POC/` | App Folder–scoped Dropbox app puts everything under `/Apps/` | Look at <https://www.dropbox.com/home/Apps/TD-Creative-Pipeline-POC/>. App Folder is the safer default; see the matrix above. |
+| Files end up in `/Apps/TD-Creative-Pipeline-POC/TD-Creative-Pipeline-POC/...` (doubled name) | App Folder app + `DROPBOX_ROOT_FOLDER=/TD-Creative-Pipeline-POC` | Set `DROPBOX_ROOT_FOLDER=/` for App Folder apps; the sandbox already prefixes the app name. |
+| `Dropbox upload skipped: token invalid → ...` (in the agent's event log) | Same as preflight failures, surfaced from the agent path | Same fix; the agent's preflight covers `adk web` runs that don't have the script-level preflight. |
 
 ## Architecture
 
@@ -488,6 +637,42 @@ uv run pytest tests/
 ```
 
 Covers Pillow composition + smart-crop, palette + logo detection, locale fallback, prohibited-word regex, the full provider/image-provider dispatch matrix (mocked — no API calls), the WCAG-style contrast math (`relative_luminance`, `contrast_ratio`, `wcag_level`, `passes_wcag_aa`), QC rule execution end-to-end against synthetic high- and low-contrast images via `QCCheckerAgent`, and the `halt_on_qc_failure` policy (failures recorded silently when false; `QCFailure` raised when true).
+
+## Advanced / Debugging
+
+The recommended demo path is `scripts/run_pipeline.py` — see [§ Quick Start](#quick-start). The two ADK invocations below are for **debugging / development only**.
+
+### ADK Web
+
+```bash
+uv run adk web .                     # opens http://127.0.0.1:8000
+```
+
+Useful when you want to:
+- inspect the Google ADK agent orchestration **visually** (each agent step streams in real time in the browser),
+- watch the per-product `ParallelAgent` branches fan out and rejoin,
+- step through state-delta updates between agents to debug what each step writes,
+- live-walk a stakeholder through the multi-agent graph without running headless from a terminal.
+
+In the dropdown, pick **`creative_pipeline`** and send any message — the message text is ignored, the pipeline kicks off regardless. The Dropbox upload step runs as the final agent in the graph, so when `DROPBOX_UPLOAD_ENABLED=true` is set in `.env`, ADK Web also uploads to Dropbox at the end.
+
+### ADK interactive terminal
+
+```bash
+uv run adk run creative_pipeline
+```
+
+Same orchestration as ADK Web, terminal-only. Useful for quick interactive runs when the visual UI isn't necessary but you still want the agent-by-agent streaming output rather than the consolidated `scripts/run_pipeline.py` log.
+
+### When to use which
+
+| You want to… | Use |
+|---|---|
+| Demo the pipeline end-to-end | **`scripts/run_pipeline.py`** (recommended) |
+| Force fresh hero generation | reset commands + `scripts/run_pipeline.py` (see [§ Fresh run](#fresh-run--force-new-hero-images)) |
+| Visually debug agent steps | `adk web .` |
+| Quick interactive terminal run | `adk run creative_pipeline` |
+| Run from CI / unattended | `scripts/run_pipeline.py` (no UI dependency) |
 
 ## Demo Video
 

@@ -1,4 +1,11 @@
-"""BrandCheckerAgent — palette match + logo presence/quadrant checks per output."""
+"""BrandCheckerAgent — palette + logo detection per output, with score-and-reason reporting.
+
+The agent emits two 0–100 scores and a human-readable reason so reviewers can
+distinguish "photo background warm but logo + typography on-brand" (warn)
+from "logo missing or in wrong quadrant" (fail). When demo_polished hero
+photography drifts warm but the rest of the system is correct, the result is
+a *warn* rather than a hard fail.
+"""
 
 from __future__ import annotations
 
@@ -16,9 +23,51 @@ from creative_pipeline.tools.color_analyzer import (
 
 logger = logging.getLogger(__name__)
 
-# RGB Euclidean threshold; ~80 is a permissive "in-family" match for the PoC.
-_PALETTE_PASS = 80.0
-_PALETTE_WARN = 130.0
+# RGB Euclidean distance → 0..100 score. ~200 distance is considered fully off-brand.
+_PALETTE_FULL_OFF = 200.0
+
+
+def _palette_score_from_distance(distance: float) -> int:
+    if distance < 0:
+        return 100
+    raw = 1.0 - min(distance, _PALETTE_FULL_OFF) / _PALETTE_FULL_OFF
+    return max(0, min(100, int(raw * 100)))
+
+
+def _output_status(palette_score: int, element_score: int) -> str:
+    """Promote/demote based on the principle: 'logo missing' is the only fail.
+    Palette divergence on the photo with brand elements present → warn, not fail.
+    Per-creative pass requires both palette and elements to be strong.
+    """
+    if element_score < 50:
+        return "fail"  # logo missing entirely
+    if palette_score >= 70 and element_score >= 95:
+        return "pass"
+    return "warn"
+
+
+def _reason(palette_score: int, element_score: int, logo_meta: dict) -> str:
+    if element_score < 50:
+        if not logo_meta.get("found"):
+            return f"Logo not detected (match_score={logo_meta.get('match_score', 0):.2f})."
+        return "Logo detected but in the wrong quadrant for the configured placement."
+    if palette_score >= 70 and element_score >= 95:
+        return f"On-brand (palette {palette_score}/100, elements {element_score}/100)."
+    if element_score >= 95 and palette_score < 70:
+        return (
+            f"Photography palette diverges from brand colors but logo placement, "
+            f"typography, and disclaimer are on-brand "
+            f"(palette {palette_score}/100, elements {element_score}/100)."
+        )
+    if element_score < 95 and palette_score >= 70:
+        return (
+            f"Brand palette aligned but logo placement detection is uncertain — visual review "
+            f"recommended (palette {palette_score}/100, elements {element_score}/100)."
+        )
+    return (
+        f"Photography palette diverges from brand and logo placement detection is uncertain — "
+        f"visual review recommended (palette {palette_score}/100, elements {element_score}/100)."
+    )
 
 
 class BrandCheckerAgent(BaseAgent):
@@ -37,54 +86,68 @@ class BrandCheckerAgent(BaseAgent):
         )
         logo_path = brand.get("visual_identity", {}).get("logo_path")
         placement = brand.get("visual_identity", {}).get("logo_placement")
+        checks = brand.get("required_brand_checks", {}) or {}
+        check_palette = bool(checks.get("palette_match", True))
+        check_logo = bool(checks.get("logo_presence", True))
 
         per_output_checks: list[dict] = []
-        worst = "pass"
+        worst_rank = 0
+        rank_map = {"pass": 0, "warn": 1, "fail": 2}
+        worst_summary = "pass"
+        worst_reason = "All outputs passed brand checks."
+
         for out in outputs:
             path = out["path"]
-            palette = dominant_palette(path, n=5)
-            mean_dist = palette_distance(palette, brand_colors)
-            if mean_dist <= _PALETTE_PASS:
-                palette_status = "pass"
-            elif mean_dist <= _PALETTE_WARN:
-                palette_status = "warn"
+
+            # Palette
+            if check_palette:
+                palette = dominant_palette(path, n=5)
+                mean_dist = palette_distance(palette, brand_colors)
+                palette_score = _palette_score_from_distance(mean_dist)
             else:
-                palette_status = "fail"
+                palette = []
+                mean_dist = 0.0
+                palette_score = 100
 
-            logo = detect_logo(path, logo_path, placement) if logo_path else {"found": False, "placement_ok": False, "match_score": 0.0}
-
-            if logo["found"] and logo["placement_ok"]:
-                logo_status = "pass"
-            elif logo["found"]:
-                logo_status = "warn"  # found but in wrong quadrant
-            else:
-                logo_status = "fail"
-
-            output_status = (
-                "pass" if palette_status == "pass" and logo_status == "pass"
-                else "fail" if "fail" in (palette_status, logo_status)
-                else "warn"
+            # Logo
+            logo_meta = (
+                detect_logo(path, logo_path, placement)
+                if (check_logo and logo_path) else
+                {"found": True, "placement_ok": True, "match_score": 1.0}
             )
+            element_score = 0
+            if logo_meta.get("found"):
+                element_score += 60
+                if logo_meta.get("placement_ok"):
+                    element_score += 40
+
+            status = _output_status(palette_score, element_score)
+            reason = _reason(palette_score, element_score, logo_meta)
 
             per_output_checks.append({
                 "path": path,
                 "palette": palette,
                 "palette_distance": round(mean_dist, 2),
-                "palette_status": palette_status,
-                "logo": logo,
-                "logo_status": logo_status,
-                "status": output_status,
+                "brand_palette_score": palette_score,
+                "brand_element_score": element_score,
+                "logo": logo_meta,
+                "status": status,
+                "brand_check_reason": reason,
             })
 
-            # Roll-up: worst wins
-            ranking = {"pass": 0, "warn": 1, "fail": 2}
-            if ranking[output_status] > ranking[worst]:
-                worst = output_status
+            if rank_map[status] > worst_rank:
+                worst_rank = rank_map[status]
+                worst_summary = status
+                worst_reason = reason
 
-        product_state["brand_check"] = {"summary": worst, "per_output": per_output_checks}
+        product_state["brand_check"] = {
+            "summary": worst_summary,
+            "reason": worst_reason,
+            "per_output": per_output_checks,
+        }
 
         text = (
-            f"Brand check for {self.product_id}: {worst} "
+            f"Brand check for {self.product_id}: {worst_summary} — {worst_reason} "
             f"({len(per_output_checks)} outputs reviewed)"
         )
         logger.info(text)

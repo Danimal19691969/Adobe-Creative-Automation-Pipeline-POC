@@ -1,4 +1,13 @@
-"""CreativeComposerAgent — produces three aspect ratios × N markets per product, no LLM."""
+"""CreativeComposerAgent — produces every aspect ratio × every market per product.
+
+Localization is **explicit** and driven by the brief:
+  - localized_copy=False (default): every (market, ratio) renders the same
+    primary ``brief.campaign_message`` in ``brief.language``. No translation,
+    no inference. Output filenames use ``{market}_{language}``.
+  - localized_copy=True: per-market locale picked via ``brand.market_locales``;
+    headline pulled from ``brief.campaign_message_localized[locale]`` (with
+    per-product override taking precedence when set).
+"""
 
 from __future__ import annotations
 
@@ -10,7 +19,7 @@ from google.adk.events import Event, EventActions
 from google.genai import types
 
 from creative_pipeline.schemas import BrandGuidelines, CampaignBrief
-from creative_pipeline.tools.file_utils import ASPECT_RATIOS, output_path, pick_locale
+from creative_pipeline.tools.file_utils import output_path, pick_locale
 from creative_pipeline.tools.pillow_composer import compose_creative
 
 logger = logging.getLogger(__name__)
@@ -36,16 +45,47 @@ class CreativeComposerAgent(BaseAgent):
                 f"AssetManagerAgent or ImageGeneratorAgent must run first."
             )
 
+        layout = brand.layout_templates.get(brief.layout_template)
+        if layout is None:
+            raise RuntimeError(
+                f"Layout template {brief.layout_template!r} not found in brand "
+                f"(BriefParserAgent should have caught this)"
+            )
+
         output_dir = os.environ.get("OUTPUT_DIR", "outputs")
-        available_locales = list(brief.campaign_message.keys())
+        ratios = list(brand.aspect_ratios.keys())
 
         outputs: list[dict] = []
         for market in brief.markets:
-            locale = pick_locale(market, available_locales)
-            headline = brief.campaign_message.get(locale) or brief.campaign_message["en"]
-            disclaimer = brand.legal.required_disclaimers.get(market)
+            # Resolve copy + locale per the explicit localization contract.
+            if brief.localized_copy:
+                available_locales = list(brief.campaign_message_localized.keys())
+                locale = pick_locale(
+                    market=market,
+                    available_locales=available_locales,
+                    market_locales=brand.market_locales,
+                    fallback_language=brief.language,
+                )
+                # Per-product override beats the brief-wide localized message.
+                if product.campaign_message:
+                    headline = product.campaign_message
+                else:
+                    headline = (
+                        brief.campaign_message_localized.get(locale)
+                        or brief.campaign_message
+                    )
+            else:
+                # Localization disabled — single language, single message.
+                locale = brief.language
+                headline = product.campaign_message or brief.campaign_message
 
-            for ratio in ASPECT_RATIOS:
+            # Disclaimer: localized only when the brief says so. Otherwise English default.
+            if brief.localized_legal_copy:
+                disclaimer = brand.legal.required_disclaimers.get(market) or brand.legal.default_disclaimer
+            else:
+                disclaimer = brand.legal.default_disclaimer
+
+            for ratio in ratios:
                 out_path = output_path(output_dir, self.product_id, ratio, market, locale)
                 meta = compose_creative(
                     hero_path=hero_path,
@@ -53,15 +93,28 @@ class CreativeComposerAgent(BaseAgent):
                     headline=headline,
                     disclaimer=disclaimer,
                     guidelines=brand,
+                    layout=layout,
                     out_path=out_path,
                 )
-                meta.update({"market": market, "locale": locale})
+                meta.update({
+                    "market": market,
+                    "locale": locale,
+                    "headline": headline,
+                    "disclaimer_text": disclaimer,
+                })
                 outputs.append(meta)
                 logger.info(
-                    "composed %s/%s %s_%s in %dms", self.product_id, ratio, market, locale, meta["duration_ms"]
+                    "composed %s/%s %s_%s in %dms (localized_copy=%s, localized_legal=%s)",
+                    self.product_id, ratio, market, locale, meta["duration_ms"],
+                    brief.localized_copy, brief.localized_legal_copy,
                 )
 
         product_state["outputs"] = outputs
+        product_state["layout_template"] = brief.layout_template
+        product_state["language"] = brief.language
+        product_state["localized_copy"] = brief.localized_copy
+        product_state["localized_legal_copy"] = brief.localized_legal_copy
+        product_state["creative_quality"] = brief.creative_quality.value
 
         yield Event(
             author=self.name,
@@ -69,12 +122,13 @@ class CreativeComposerAgent(BaseAgent):
                 role="model",
                 parts=[types.Part(text=(
                     f"Composed {len(outputs)} creatives for {self.product_id} "
-                    f"({len(brief.markets)} markets × {len(ASPECT_RATIOS)} ratios)."
+                    f"({len(brief.markets)} markets × {len(ratios)} ratios) — "
+                    f"language={brief.language}, localized_copy={brief.localized_copy}, "
+                    f"layout={brief.layout_template}."
                 ))],
             ),
             actions=EventActions(state_delta={product_key: product_state}),
         )
 
 
-# Default singleton — used when product_id is set at root-assembly time (Phase 5).
 creative_composer_agent = CreativeComposerAgent(name="CreativeComposerAgent")

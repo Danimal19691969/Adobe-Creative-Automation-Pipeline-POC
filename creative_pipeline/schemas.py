@@ -1,11 +1,18 @@
-"""Pydantic v2 schemas for brand guidelines and campaign briefs."""
+"""Pydantic v2 schemas for brand guidelines and campaign briefs.
+
+These are the **only** place where input contracts are enforced. Hard-coded
+fallbacks in tooling exist solely as safety nets when YAML is silent — every
+substantive value (typography sizing, layout knobs, aspect ratios, locale
+fallback chains, prompt direction) is read from these models.
+"""
 
 from __future__ import annotations
 
 import re
 from enum import Enum
+from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
@@ -17,11 +24,71 @@ class LogoPlacement(str, Enum):
     BOTTOM_RIGHT = "bottom-right"
 
 
+class HeadlineCase(str, Enum):
+    SENTENCE = "sentence"
+    UPPER = "upper"
+    TITLE = "title"
+    AS_IS = "as_is"
+
+
+class CreativeQuality(str, Enum):
+    ROUGH_DRAFT = "rough_draft"
+    DEMO_POLISHED = "demo_polished"
+    PRODUCTION = "production"
+
+
+class OverlayStyle(str, Enum):
+    SCRIM = "scrim"
+    VERTICAL_GRADIENT = "vertical_gradient"
+    DIAGONAL_GRADIENT = "diagonal_gradient"
+    NONE = "none"
+
+
+class AccentStyle(str, Enum):
+    NONE = "none"
+    SIDE_RAIL = "side_rail"
+    UNDERLINE = "underline"
+    COLOR_BLOCK = "color_block"
+    SOFT_GLOW = "soft_glow"
+
+
+class AccentColorRole(str, Enum):
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+    ACCENT = "accent"
+
+
+class DisclaimerPlacement(str, Enum):
+    UNDER_HEADLINE = "under_headline"
+    BOTTOM_CORNER = "bottom_corner"
+    BOTTOM_CENTER = "bottom_center"
+
+
+class LogoTreatment(str, Enum):
+    PLAIN = "plain"
+    BADGE = "badge"
+
+
+class PaletteInfluence(str, Enum):
+    OFF = "off"
+    LIGHT = "light"
+    MEDIUM = "medium"
+    STRONG = "strong"
+
+
+class TextAlign(str, Enum):
+    LEFT = "left"
+    CENTER = "center"
+    RIGHT = "right"
+
+
 def _validate_hex(value: str) -> str:
     if not _HEX_RE.match(value):
         raise ValueError(f"Invalid hex color {value!r}; expected '#RRGGBB'")
     return value.upper()
 
+
+# -------- Brand --------
 
 class VoiceAndTone(BaseModel):
     personality: list[str] = Field(default_factory=list)
@@ -29,28 +96,124 @@ class VoiceAndTone(BaseModel):
 
 
 class VisualIdentity(BaseModel):
-    primary_colors: list[str]
+    primary_color: str
+    secondary_color: str
+    accent_color: str
+    # Backwards-compat lists (used by BrandCheckerAgent's palette match).
+    primary_colors: list[str] = Field(default_factory=list)
     accent_colors: list[str] = Field(default_factory=list)
     logo_path: str
     logo_placement: LogoPlacement
     safe_zone_pct: float = Field(ge=0.0, le=0.5)
+    logo_height_pct: float = Field(default=0.10, gt=0.0, le=0.5)
+    # Logo treatment: plain paste vs. soft brand-color badge behind the mark.
+    logo_treatment: LogoTreatment = LogoTreatment.PLAIN
+    logo_badge_opacity: float = Field(default=0.72, ge=0.0, le=1.0)
+    logo_badge_color: str = "#FFFFFF"
+
+    @field_validator("logo_badge_color")
+    @classmethod
+    def _hex_badge(cls, v: str) -> str:
+        return _validate_hex(v)
+
+    @field_validator("primary_color", "secondary_color", "accent_color")
+    @classmethod
+    def _hex_single(cls, v: str) -> str:
+        return _validate_hex(v)
 
     @field_validator("primary_colors", "accent_colors")
     @classmethod
-    def _hex_colors(cls, v: list[str]) -> list[str]:
+    def _hex_list(cls, v: list[str]) -> list[str]:
         return [_validate_hex(c) for c in v]
+
+    @model_validator(mode="after")
+    def _backfill_lists(self) -> "VisualIdentity":
+        # If the legacy *_colors lists are empty, derive them from the singletons
+        # so existing tooling (BrandChecker palette match) still gets a list.
+        if not self.primary_colors:
+            self.primary_colors = [self.primary_color, self.secondary_color]
+        if not self.accent_colors:
+            self.accent_colors = [self.accent_color]
+        return self
 
 
 class Typography(BaseModel):
     headline_font: str
     body_font: str
+    fonts_dir: str = "fonts"
     text_color_on_dark: str
     text_color_on_light: str
+    headline_size_ratio: float = Field(default=0.07, gt=0.0, le=0.5)
+    body_size_ratio: float = Field(default=0.022, gt=0.0, le=0.2)
+    headline_case: HeadlineCase = HeadlineCase.SENTENCE
 
     @field_validator("text_color_on_dark", "text_color_on_light")
     @classmethod
     def _hex(cls, v: str) -> str:
         return _validate_hex(v)
+
+
+class PerAspectLayout(BaseModel):
+    """Per-aspect-ratio overrides for the layout template.
+
+    headline_box is (x0, y0, x1, y1) as fractions of (W, H). Defaults to the
+    bottom band (full width, lower 30%). The composer renders the headline
+    and disclaimer inside this box with the configured text_align.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    headline_box: tuple[float, float, float, float] = (0.05, 0.65, 0.95, 0.95)
+    text_align: TextAlign = TextAlign.CENTER
+
+    @field_validator("headline_box")
+    @classmethod
+    def _box_in_unit_square(cls, v: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        x0, y0, x1, y1 = v
+        for c in v:
+            if not (0.0 <= c <= 1.0):
+                raise ValueError(f"headline_box coordinate {c} must be in [0, 1]")
+        if x0 >= x1 or y0 >= y1:
+            raise ValueError(f"headline_box must satisfy x0<x1 and y0<y1 (got {v})")
+        return v
+
+
+class LayoutTemplate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    # Legacy "scrim" fields — kept for backwards compatibility. New layouts use
+    # overlay_style + overlay_opacity_pct + overlay_extent_pct instead.
+    text_region_pct: float = Field(default=0.30, gt=0.0, le=1.0)
+    scrim_opacity_pct: float = Field(default=0.40, ge=0.0, le=1.0)
+    scrim_padding_pct: float = Field(default=0.04, ge=0.0, le=0.5)
+    headline_size_ratio: Optional[float] = Field(default=None, gt=0.0, le=0.5)
+    body_size_ratio: Optional[float] = Field(default=None, gt=0.0, le=0.2)
+    luminance_threshold: int = Field(default=140, ge=0, le=255)
+
+    # New, polished-layout knobs (all optional with safe defaults).
+    overlay_style: OverlayStyle = OverlayStyle.SCRIM
+    overlay_opacity_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    overlay_extent_pct: Optional[float] = Field(default=None, gt=0.0, le=1.0)
+
+    accent_style: AccentStyle = AccentStyle.NONE
+    accent_color_role: AccentColorRole = AccentColorRole.PRIMARY
+    accent_thickness_pct: float = Field(default=0.006, gt=0.0, le=0.05)
+
+    disclaimer_placement: DisclaimerPlacement = DisclaimerPlacement.UNDER_HEADLINE
+    disclaimer_padding_pct: float = Field(default=0.025, ge=0.0, le=0.20)
+
+    text_align_default: TextAlign = TextAlign.CENTER
+    per_aspect: dict[str, PerAspectLayout] = Field(default_factory=dict)
+
+    def overlay_opacity(self) -> float:
+        """Resolved opacity for whichever overlay style is in use."""
+        if self.overlay_opacity_pct is not None:
+            return self.overlay_opacity_pct
+        return self.scrim_opacity_pct
+
+    def overlay_extent(self) -> float:
+        if self.overlay_extent_pct is not None:
+            return self.overlay_extent_pct
+        return self.text_region_pct
 
 
 class ImageryStyle(BaseModel):
@@ -60,37 +223,124 @@ class ImageryStyle(BaseModel):
 
 
 class LegalRules(BaseModel):
+    # English-language disclaimer rendered when localized_legal_copy=False on
+    # the brief, regardless of market.
+    default_disclaimer: str = "Terms and conditions apply."
     prohibited_words: list[str] = Field(default_factory=list)
+    # Per-market localized disclaimer text. Only rendered when the brief has
+    # localized_legal_copy=True.
     required_disclaimers: dict[str, str] = Field(default_factory=dict)
 
 
+class RequiredBrandChecks(BaseModel):
+    palette_match: bool = True
+    logo_presence: bool = True
+    contrast_ratio: bool = True   # WCAG headline-vs-background contrast QC
+
+
+class QCRules(BaseModel):
+    """Brand-level thresholds for the modular QC rule system."""
+    model_config = ConfigDict(extra="ignore")
+
+    min_contrast_ratio: float = Field(default=4.5, gt=1.0, le=21.0)
+    large_text_min_ratio: float = Field(default=3.0, gt=1.0, le=21.0)
+    large_text_size_threshold_px: int = Field(default=24, gt=0)
+
+
 class BrandGuidelines(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     brand_id: str = Field(min_length=1)
+    brand_name: str = Field(min_length=1)
     voice_and_tone: VoiceAndTone
     visual_identity: VisualIdentity
     typography: Typography
+    layout_templates: dict[str, LayoutTemplate] = Field(default_factory=dict)
+    aspect_ratios: dict[str, tuple[int, int]] = Field(default_factory=dict)
     imagery_style: ImageryStyle
+    creative_quality_presets: dict[CreativeQuality, str] = Field(default_factory=dict)
     legal: LegalRules
+    required_brand_checks: RequiredBrandChecks = Field(default_factory=RequiredBrandChecks)
+    qc: QCRules = Field(default_factory=QCRules)
+    market_locales: dict[str, list[str]] = Field(default_factory=dict)
 
+    # Palette guidance — applied during image generation. Brief can override.
+    generation_palette_hint: Optional[str] = None
+    brand_palette_influence: PaletteInfluence = PaletteInfluence.MEDIUM
+
+    @model_validator(mode="after")
+    def _has_at_least_one_layout(self) -> "BrandGuidelines":
+        if not self.layout_templates:
+            raise ValueError("brand.layout_templates must define at least one template")
+        if not self.aspect_ratios:
+            raise ValueError("brand.aspect_ratios must define at least one ratio")
+        return self
+
+
+# -------- Campaign brief --------
 
 class Product(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     id: str = Field(min_length=1)
     name: str
     category: str
     description: str
+    prompt_keywords: list[str] = Field(default_factory=list)
+    # Per-product negative prompt direction (joined with brand.imagery_style.avoid)
+    prompt_avoid: list[str] = Field(default_factory=list)
+    campaign_message: Optional[str] = None  # optional per-product override
 
 
 class CampaignBrief(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     campaign_id: str = Field(min_length=1)
+    campaign_name: str = Field(min_length=1)
     brand_id: str = Field(min_length=1)
-    region: str
+
+    # Localization contract — explicit, not inferred.
+    language: str = Field(default="en", min_length=2, max_length=5)
+    localized_copy: bool = False
+    # When False (default), every market renders the brand's default English
+    # disclaimer regardless of brand.legal.required_disclaimers.
+    # When True, the per-market localized disclaimer is rendered.
+    localized_legal_copy: bool = False
+
+    # Image-source contract — explicit. When True, the asset manager skips its
+    # cache lookups so the configured IMAGE_PROVIDER actually fires.
+    force_generate_hero: bool = False        # ignore inputs/assets/{pid}/hero.*
+    regenerate_cached_assets: bool = False   # ignore outputs/{pid}/source/*
+
+    # QC policy. When True, the QC checker raises after running so the
+    # pipeline halts on any failed creative; when False, failures are
+    # recorded in the report but the run completes.
+    halt_on_qc_failure: bool = False
+
+    target_region: str
     markets: list[str] = Field(min_length=1)
     target_audience: str
-    campaign_message: dict[str, str]
+
+    creative_quality: CreativeQuality = CreativeQuality.DEMO_POLISHED
+    layout_template: str = Field(min_length=1)
+
+    # Per-campaign overrides for palette guidance. None → fall back to the
+    # brand defaults. Brief takes precedence over brand when set.
+    brand_palette_influence: Optional[PaletteInfluence] = None
+    generation_palette_hint: Optional[str] = None
+
+    # Primary single-language message (rendered when localized_copy=False).
+    campaign_message: str = Field(min_length=1)
+    # Optional locale-keyed override map (rendered when localized_copy=True).
+    campaign_message_localized: dict[str, str] = Field(default_factory=dict)
+
     products: list[Product] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _en_required(self) -> CampaignBrief:
-        if "en" not in self.campaign_message or not self.campaign_message["en"].strip():
-            raise ValueError("campaign_message must include a non-empty 'en' entry")
+    def _localized_consistency(self) -> "CampaignBrief":
+        if self.localized_copy:
+            if self.language not in self.campaign_message_localized:
+                # When localized_copy is on, the primary language must have a localized entry
+                # so it can be used as a baseline / fallback. Auto-populate from campaign_message.
+                self.campaign_message_localized[self.language] = self.campaign_message
         return self

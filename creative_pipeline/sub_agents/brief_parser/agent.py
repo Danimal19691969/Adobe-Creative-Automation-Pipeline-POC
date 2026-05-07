@@ -38,15 +38,37 @@ class BriefParserAgent(BaseAgent):
                 f"brand_id={brand['brand_id']!r}"
             )
 
+        # Cross-validate that the brief's layout_template exists in the brand.
+        brand_templates = list(brand.get("layout_templates", {}).keys())
+        if brief.layout_template not in brand_templates:
+            raise ValueError(
+                f"Brief layout_template={brief.layout_template!r} not defined in brand. "
+                f"Available templates: {brand_templates}"
+            )
+
+        # When localized_copy is True, every market must resolve to a locale that
+        # exists in either campaign_message_localized or has en as a fallback.
+        if brief.localized_copy:
+            market_locales = brand.get("market_locales", {})
+            available = set(brief.campaign_message_localized.keys()) | {brief.language}
+            for market in brief.markets:
+                chain = market_locales.get(market, [brief.language])
+                if not any(loc in available for loc in chain):
+                    raise ValueError(
+                        f"Market {market!r} cannot be served by available locales "
+                        f"{sorted(available)} via chain {chain}"
+                    )
+
         logger.info(
-            "Parsed campaign brief: campaign_id=%s products=%s markets=%s",
-            brief.campaign_id, [p.id for p in brief.products], brief.markets,
+            "Parsed campaign brief: campaign_id=%s language=%s localized_copy=%s "
+            "layout_template=%s creative_quality=%s products=%s markets=%s",
+            brief.campaign_id, brief.language, brief.localized_copy,
+            brief.layout_template, brief.creative_quality.value,
+            [p.id for p in brief.products], brief.markets,
         )
 
         # Per-product state lives at flat keys "product:{pid}" so that parallel
         # product branches can each update their own key without racing siblings.
-        # state_delta is shallow-merged by the session service, so nested writes
-        # under a single "products" dict would clobber each other.
         product_ids = [p.id for p in brief.products]
         per_product_seeds = {f"product:{pid}": {} for pid in product_ids}
 
@@ -55,8 +77,10 @@ class BriefParserAgent(BaseAgent):
             content=types.Content(
                 role="model",
                 parts=[types.Part(text=(
-                    f"Loaded campaign '{brief.campaign_id}' with "
-                    f"{len(brief.products)} products and {len(brief.markets)} markets."
+                    f"Loaded campaign '{brief.campaign_id}' "
+                    f"(language={brief.language}, localized_copy={brief.localized_copy}, "
+                    f"layout={brief.layout_template}) — {len(brief.products)} products, "
+                    f"{len(brief.markets)} markets."
                 ))],
             ),
             actions=EventActions(state_delta={

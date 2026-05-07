@@ -1,25 +1,117 @@
 brand_id: "aquacorp_global"
+brand_name: "AquaCorp"
+
 voice_and_tone:
   personality: ["refreshing", "honest", "energetic"]
   avoid: ["clinical", "aggressive", "hyperbolic"]
+
 visual_identity:
+  primary_color: "#00B4D8"
+  secondary_color: "#023E8A"
+  accent_color: "#90E0EF"
   primary_colors: ["#00B4D8", "#FFFFFF", "#023E8A"]
   accent_colors: ["#90E0EF"]
   logo_path: "inputs/assets/global/logo.png"
   logo_placement: "top-right"
-  safe_zone_pct: 0.08
+  safe_zone_pct: 0.06
+  logo_height_pct: 0.085
+  logo_treatment: badge
+  logo_badge_opacity: 0.72
+  logo_badge_color: "#FFFFFF"
+
 typography:
   headline_font: "Montserrat-Bold.ttf"
   body_font: "OpenSans-Regular.ttf"
+  fonts_dir: "fonts"
   text_color_on_dark: "#FFFFFF"
   text_color_on_light: "#023E8A"
+  headline_size_ratio: 0.062
+  body_size_ratio: 0.018
+  headline_case: "sentence"
+
+# Palette guidance — applied to the image-gen prompt. Each campaign can override.
+generation_palette_hint: "cyan, deep navy, clean white, fresh water tones, bright summer highlights"
+brand_palette_influence: medium
+
+# Layout templates — composer reads template_name from the brief, then this map.
+# Add new templates without touching code.
+layout_templates:
+
+  # Legacy template (still works). Heavy horizontal scrim across the bottom.
+  hero_full_bleed_footer:
+    overlay_style: scrim
+    overlay_opacity_pct: 0.40
+    overlay_extent_pct: 0.30
+    headline_size_ratio: 0.07
+    body_size_ratio: 0.022
+    luminance_threshold: 140
+    accent_style: none
+    disclaimer_placement: under_headline
+    text_align_default: center
+
+  # Polished campaign-creative layout. Soft vertical gradient from the bottom,
+  # per-aspect headline boxes that avoid the product focal area, brand accent
+  # rail, disclaimer in a clean bottom corner.
+  premium_product_hero:
+    overlay_style: vertical_gradient
+    overlay_opacity_pct: 0.65
+    overlay_extent_pct: 0.50
+    headline_size_ratio: 0.060
+    body_size_ratio: 0.018
+    luminance_threshold: 140
+    accent_style: side_rail
+    accent_color_role: primary
+    accent_thickness_pct: 0.006
+    disclaimer_placement: bottom_corner
+    disclaimer_padding_pct: 0.030
+    text_align_default: left
+    per_aspect:
+      "1x1":
+        headline_box: [0.06, 0.62, 0.78, 0.92]
+        text_align: left
+      "9x16":
+        headline_box: [0.06, 0.66, 0.94, 0.92]
+        text_align: left
+      "16x9":
+        headline_box: [0.04, 0.50, 0.55, 0.93]
+        text_align: left
+
+aspect_ratios:
+  "1x1":  [1080, 1080]
+  "9x16": [1080, 1920]
+  "16x9": [1920, 1080]
+
 imagery_style:
   mood: "bright, natural, outdoors"
   avoid: ["dark backgrounds", "artificial lighting", "cluttered scenes"]
   style_prompt_suffix: "photorealistic, vibrant, lifestyle photography, white background"
+
+creative_quality_presets:
+  rough_draft: "draft sketch quality, quick concept, fast iteration"
+  demo_polished: "premium commercial photography, magazine-quality finish, professional studio lighting, sharp focus, color-graded, social campaign hero, editorial advertising aesthetic"
+  production: "premium commercial photography, hero shot, editorial finish, color-graded, retouched, agency-grade"
+
 legal:
+  default_disclaimer: "Terms and conditions apply."
   prohibited_words: ["guaranteed", "best", "cure", "clinically proven"]
   required_disclaimers:
     MX: "Aplican términos y condiciones."
     BR: "Consulte os termos e condições."
     CO: "Aplican términos y condiciones."
+
+required_brand_checks:
+  palette_match: true
+  logo_presence: true
+  contrast_ratio: true   # WCAG headline-vs-background contrast QC
+
+# Quality-control thresholds (WCAG 2.1 AA defaults).
+qc:
+  min_contrast_ratio: 4.5             # AA normal text
+  large_text_min_ratio: 3.0           # AA for ≥18pt or ≥14pt bold
+  large_text_size_threshold_px: 24    # below this, treat as normal text
+
+market_locales:
+  MX: ["es", "en"]
+  BR: ["pt", "en"]
+  CO: ["es", "en"]
+  US: ["en"]

@@ -1,18 +1,61 @@
-campaign_id: "summer_refresh_2025"
-brand_id: "aquacorp_global"
-region: "LATAM"
-markets: ["MX", "BR", "CO"]
-target_audience: "Health-conscious adults 25-40"
-campaign_message:
-  en: "Refresh your summer, naturally."
-  es: "Refresca tu verano, naturalmente."
-  pt: "Renove seu verão, naturalmente."
+campaign_id: summer_refresh_2025
+campaign_name: Summer Refresh 2025
+brand_id: aquacorp_global
+language: en
+localized_copy: false
+localized_legal_copy: false
+force_generate_hero: true
+regenerate_cached_assets: true
+halt_on_qc_failure: false
+target_region: LATAM
+markets:
+- MX
+- BR
+- CO
+target_audience: Health-conscious adults 25-40
+creative_quality: demo_polished
+layout_template: premium_product_hero
+brand_palette_influence: medium
+generation_palette_hint: cyan, deep navy, clean white, fresh water tones, bright summer
+  highlights, soft sky and ocean cues
+campaign_message: Refresh your summer, naturally.
+campaign_message_localized:
+  en: Refresh your summer, naturally.
+  es: Refresca tu verano, naturalmente.
+  pt: "Renove seu ver\xE3o, naturalmente."
 products:
-  - id: aquavita_sparkling
-    name: "AquaVita Sparkling Water"
-    category: beverage
-    description: "Lightly carbonated mineral water with natural fruit essence"
-  - id: sunguard_spf50
-    name: "SunGuard SPF 50 Lotion"
-    category: skincare
-    description: "Reef-safe broad-spectrum sunscreen for active outdoor use"
+- id: aquavita_sparkling
+  name: AquaVita Sparkling Water
+  category: beverage
+  description: Lightly carbonated mineral water with natural fruit essence
+  prompt_keywords:
+  - premium sparkling water product photography
+  - realistic glass bottle hero with light condensation
+  - fresh citrus garnish, ice, bubbles
+  - warm summer light
+  - soft lifestyle background, beach or garden bokeh
+  - strong depth and reflections
+  - clean negative space at the bottom for copy overlay
+  - high-end consumer goods campaign style
+  prompt_avoid:
+  - embedded text or words in the image
+  - tiny fake label text
+  - flat placeholder mockup
+  - "stock-photo clich\xE9"
+- id: sunguard_spf50
+  name: SunGuard SPF 50 Lotion
+  category: skincare
+  description: Reef-safe broad-spectrum sunscreen for active outdoor use
+  prompt_keywords:
+  - premium sunscreen and skincare product photography
+  - realistic SPF 50 white pump bottle hero
+  - beach towel, sunlight, sand, skincare lifestyle scene
+  - warm summer light with strong shadows and reflections
+  - shallow depth of field
+  - clean negative space at the bottom for copy overlay
+  - high-end social campaign style
+  prompt_avoid:
+  - embedded text or words in the image
+  - giant fake SPF text cropped awkwardly
+  - people in the frame
+  - flat placeholder mockup

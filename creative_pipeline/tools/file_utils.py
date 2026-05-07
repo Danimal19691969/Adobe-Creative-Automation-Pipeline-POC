@@ -1,37 +1,37 @@
-"""File-path helpers and locale fallback rules."""
+"""File-path helpers and locale fallback logic.
+
+This module no longer holds the source of truth for market→locale mappings or
+aspect-ratio dimensions — those live in ``inputs/brand/guidelines.yaml`` under
+``market_locales`` and ``aspect_ratios``. The helpers below are pure functions
+that operate on values passed in by the caller.
+"""
 
 from __future__ import annotations
 
-# Spec §6.3 — market → ordered locale fallback chain.
-MARKET_TO_LOCALE: dict[str, list[str]] = {
-    "MX": ["es", "en"],
-    "BR": ["pt", "en"],
-    "CO": ["es", "en"],
-    "US": ["en"],
-}
 
-ASPECT_RATIOS: dict[str, tuple[int, int]] = {
-    "1x1":  (1080, 1080),
-    "9x16": (1080, 1920),
-    "16x9": (1920, 1080),
-}
-
-
-def pick_locale(market: str, available_locales: list[str]) -> str:
+def pick_locale(
+    market: str,
+    available_locales: list[str],
+    market_locales: dict[str, list[str]],
+    fallback_language: str = "en",
+) -> str:
     """Return the first locale in the market's fallback chain that is available.
 
-    Falls back to 'en' for unknown markets. Raises if 'en' itself is missing
-    (BriefParserAgent already guards this, but defensive here).
+    Args:
+        market: market code, e.g. "MX".
+        available_locales: locale codes that have copy defined in the brief.
+        market_locales: market → ordered fallback chain, from brand guidelines.
+        fallback_language: default if market is unknown and chain has no match.
     """
-    chain = MARKET_TO_LOCALE.get(market, ["en"])
+    chain = market_locales.get(market, [fallback_language])
     for locale in chain:
         if locale in available_locales:
             return locale
-    if "en" in available_locales:
-        return "en"
+    if fallback_language in available_locales:
+        return fallback_language
     raise ValueError(
         f"No suitable locale for market {market!r}; "
-        f"chain={chain}, available={available_locales}"
+        f"chain={chain}, available={available_locales}, fallback={fallback_language}"
     )
 
 

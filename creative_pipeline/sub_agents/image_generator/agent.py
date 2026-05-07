@@ -1,26 +1,25 @@
 """ImageGeneratorAgent — LiteLLM-backed agent that generates a hero image.
 
-Activation gate (per spec §7.4): only fires the underlying LLM + image-gen tool
-when ``state['product:{pid}']['hero_path']`` is None. If the asset manager
-already located a cached hero, this agent emits a no-op event.
+Activation gate:
+  - If the asset manager already located a hero (user-supplied or cached
+    generation), skip the LLM and the image API entirely.
+  - Otherwise build the prompt, delegate to the LiteLLM-backed inner LlmAgent
+    which calls the generate_hero_image tool, and persist the result to
+    outputs/{pid}/source/global_{ts}.png with a sidecar JSON capturing
+    asset_source / image_model / image_provider / image_gen_latency_ms so
+    subsequent runs (with regenerate_cached_assets=False) can reuse it.
 
-Architecture:
-
-  ImageGeneratorAgent (BaseAgent, per-product wrapper)
-    - cache check (skip if hero_path is set)
-    - delegates to inner LlmAgent (LiteLLM-backed, via make_llm())
-        - tool: generate_hero_image (image-provider dispatcher)
-        - before_model_callback: legal_precheck_callback (halts on prohibited words)
-    - records image-gen result + asset_source = "generated" into state
-
-The cache-check wrapper around an LlmAgent keeps the LlmAgent + before-model
-callback shape from spec §7.4 while making the gate deterministic instead of
-LLM-decided (the LLM has nothing useful to add to a binary cache hit/miss).
+The cache wrapper around an LlmAgent keeps the LlmAgent + before-model-callback
+shape (legal pre-check halts on prohibited words) while making the cache gate
+deterministic — the LLM has nothing useful to add to a binary cache hit/miss.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from google.adk.agents import BaseAgent, LlmAgent
@@ -37,26 +36,35 @@ from creative_pipeline.tools.llm_factory import make_llm
 logger = logging.getLogger(__name__)
 
 
-def _build_inner_llm_agent(product_id: str) -> LlmAgent:
-    """Per-product LlmAgent that calls the generate_hero_image tool exactly once."""
+def _build_inner_llm_agent(product_id: str, hero_aspect_ratio: str) -> LlmAgent:
     return LlmAgent(
         name=f"ImageGenLLM_{product_id}",
         model=make_llm(),
         instruction=(
             "You are responsible for generating a single hero image for a marketing "
-            "campaign. The user message will contain the prompt and the output path. "
-            "Call the generate_hero_image tool exactly once with: prompt=<the prompt>, "
-            "out_path=<the out_path>, aspect_ratio='1:1'. Do not call any other tool. "
-            "After the tool returns, reply with a one-sentence confirmation."
+            "campaign. The user message contains the prompt, the output path, and "
+            "the aspect ratio. Call the generate_hero_image tool exactly once with "
+            "prompt, out_path, and aspect_ratio set to those values. Do not call "
+            "any other tool. After the tool returns, reply with a one-sentence "
+            "confirmation. The aspect ratio for this run is "
+            f"'{hero_aspect_ratio}'."
         ),
         tools=[generate_hero_image],
         before_model_callback=legal_precheck_callback,
     )
 
 
-class ImageGeneratorAgent(BaseAgent):
-    """Per-product custom agent. Cache check + LiteLLM-backed tool invocation."""
+def _source_paths(product_id: str) -> tuple[Path, Path, str]:
+    """(out_path, sidecar_path, timestamp) for a fresh generation."""
+    output_dir = os.environ.get("OUTPUT_DIR", "outputs")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = Path(output_dir) / product_id / "source"
+    out_path = out_dir / f"global_{ts}.png"
+    sidecar = out_path.with_suffix(".json")
+    return out_path, sidecar, ts
 
+
+class ImageGeneratorAgent(BaseAgent):
     product_id: str = ""
 
     async def _run_async_impl(self, ctx):
@@ -64,9 +72,13 @@ class ImageGeneratorAgent(BaseAgent):
         product_key = f"product:{self.product_id}"
         product_state = dict(state.get(product_key, {}))
 
-        # Cache hit — no LLM call, no image-gen API call.
+        # Cache hit (asset manager found a user-supplied or previously-generated hero).
         if product_state.get("hero_path"):
-            text = f"[cache hit] reusing hero for {self.product_id}: {product_state['hero_path']}"
+            text = (
+                f"[cache hit] reusing hero for {self.product_id} "
+                f"(asset_source={product_state.get('asset_source')}): "
+                f"{product_state['hero_path']}"
+            )
             logger.info(text)
             yield Event(
                 author=self.name,
@@ -82,18 +94,23 @@ class ImageGeneratorAgent(BaseAgent):
             raise RuntimeError(f"Product {self.product_id!r} not found in brief")
 
         prompt = build_prompt(product, brief, brand)
-        out_path = f"inputs/assets/{self.product_id}/hero.png"
-        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        out_path, sidecar_path, ts = _source_paths(self.product_id)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        inner_agent = _build_inner_llm_agent(self.product_id)
-        runner = InMemoryRunner(
-            agent=inner_agent, app_name=f"image_gen_{self.product_id}"
-        )
+        # Hero generated at the first declared aspect ratio (default 1x1).
+        hero_aspect = next(iter(brand.aspect_ratios.keys()), "1x1")
+        hero_aspect_api = hero_aspect.replace("x", ":")
+
+        # OpenAI quality knob is sourced from creative_quality. We thread it via env
+        # because the tool function signature is shared across providers; the openai
+        # tool reads OPENAI_IMAGE_QUALITY and ignores anything Imagen doesn't support.
+        os.environ["OPENAI_IMAGE_QUALITY"] = brief.creative_quality.value
+
+        inner_agent = _build_inner_llm_agent(self.product_id, hero_aspect_api)
+        runner = InMemoryRunner(agent=inner_agent, app_name=f"image_gen_{self.product_id}")
         sub_session = await runner.session_service.create_session(
             app_name=f"image_gen_{self.product_id}",
             user_id="pipeline",
-            # Forward brand/brief into the sub-session so legal_precheck_callback
-            # can read state["brief"] / state["brand"] from the inner LlmAgent.
             state={"brief": state["brief"], "brand": state["brand"]},
         )
 
@@ -102,7 +119,7 @@ class ImageGeneratorAgent(BaseAgent):
             parts=[types.Part(text=(
                 f"prompt: {prompt}\n"
                 f"out_path: {out_path}\n"
-                f"aspect_ratio: 1:1"
+                f"aspect_ratio: {hero_aspect_api}"
             ))],
         )
 
@@ -110,7 +127,6 @@ class ImageGeneratorAgent(BaseAgent):
         async for inner_event in runner.run_async(
             user_id="pipeline", session_id=sub_session.id, new_message=user_msg
         ):
-            # Capture the function-response payload from the tool the LLM called.
             if inner_event.content and inner_event.content.parts:
                 for part in inner_event.content.parts:
                     fn_response = getattr(part, "function_response", None)
@@ -124,14 +140,29 @@ class ImageGeneratorAgent(BaseAgent):
                 f"ImageGeneratorAgent: inner LLM did not call generate_hero_image for {self.product_id}"
             )
 
+        # Persist sidecar so the next run with regenerate_cached_assets=False can
+        # surface the same provenance via AssetManagerAgent.
+        sidecar_payload = {
+            "asset_source": tool_result.get("asset_source"),
+            "image_model": tool_result.get("model"),
+            "image_provider": tool_result.get("provider"),
+            "image_gen_latency_ms": tool_result.get("latency_ms"),
+            "generated_at": ts,
+            "prompt": prompt,
+        }
+        sidecar_path.write_text(json.dumps(sidecar_payload, indent=2))
+
         product_state["hero_path"] = tool_result["path"]
-        product_state["asset_source"] = "generated"
-        product_state["image_model"] = tool_result["model"]
-        product_state["image_gen_latency_ms"] = tool_result["latency_ms"]
+        product_state["asset_source"] = tool_result.get("asset_source")
+        product_state["image_model"] = tool_result.get("model")
+        product_state["image_provider"] = tool_result.get("provider")
+        product_state["image_gen_latency_ms"] = tool_result.get("latency_ms")
+        product_state["used_cache"] = False
 
         text = (
             f"Generated hero for {self.product_id}: {tool_result['path']} "
-            f"({tool_result['model']}, {tool_result['latency_ms']}ms)"
+            f"({tool_result.get('asset_source')}, {tool_result.get('model')}, "
+            f"{tool_result.get('latency_ms')}ms)"
         )
         logger.info(text)
         yield Event(

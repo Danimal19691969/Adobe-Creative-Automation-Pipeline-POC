@@ -22,6 +22,7 @@ from creative_pipeline.sub_agents.brief_parser import brief_parser_agent
 from creative_pipeline.sub_agents.creative_composer.agent import CreativeComposerAgent
 from creative_pipeline.sub_agents.image_generator.agent import ImageGeneratorAgent
 from creative_pipeline.sub_agents.legal_checker.agent import LegalCheckerAgent
+from creative_pipeline.sub_agents.qc_checker.agent import QCCheckerAgent
 from creative_pipeline.sub_agents.reporter import reporter_agent
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ def _product_pipeline(product_id: str) -> SequentialAgent:
             CreativeComposerAgent(name=f"CreativeComposer_{product_id}", product_id=product_id),
             BrandCheckerAgent(name=f"BrandChecker_{product_id}", product_id=product_id),
             LegalCheckerAgent(name=f"LegalChecker_{product_id}", product_id=product_id),
+            QCCheckerAgent(name=f"QCChecker_{product_id}", product_id=product_id),
         ],
     )
 

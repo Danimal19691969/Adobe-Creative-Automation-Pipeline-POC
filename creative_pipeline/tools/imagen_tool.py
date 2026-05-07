@@ -48,4 +48,10 @@ def generate_with_imagen(
     Path(out_path).write_bytes(image_bytes)
     logger.info("Imagen 3 wrote %s in %dms", out_path, latency_ms)
 
-    return {"path": out_path, "latency_ms": latency_ms, "model": model}
+    return {
+        "path": out_path,
+        "latency_ms": latency_ms,
+        "model": model,
+        "provider": "google",
+        "asset_source": "imagen_generated",
+    }

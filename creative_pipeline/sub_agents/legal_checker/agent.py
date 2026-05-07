@@ -42,6 +42,28 @@ def _scan_prohibited_words(messages: dict[str, str], prohibited: list[str]) -> l
     return hits
 
 
+def _collect_messages(brief: dict) -> dict[str, str]:
+    """Pull every piece of rendered copy out of the brief into a {label: text} dict
+    so they can be regex-scanned together. Handles the current schema
+    (campaign_message: str, campaign_message_localized: dict) and the legacy
+    shape (campaign_message: dict)."""
+    out: dict[str, str] = {}
+    cm = brief.get("campaign_message")
+    if isinstance(cm, str):
+        out["primary"] = cm
+    elif isinstance(cm, dict):
+        out.update({f"primary[{k}]": v for k, v in cm.items()})
+    localized = brief.get("campaign_message_localized") or {}
+    if isinstance(localized, dict):
+        out.update({f"localized[{k}]": v for k, v in localized.items()})
+    # Per-product overrides
+    for product in brief.get("products", []) or []:
+        msg = product.get("campaign_message")
+        if isinstance(msg, str) and msg:
+            out[f"product[{product.get('id', '?')}]"] = msg
+    return out
+
+
 def legal_precheck_callback(
     callback_context: CallbackContext,
     llm_request: LlmRequest,
@@ -51,16 +73,15 @@ def legal_precheck_callback(
     brief = state.get("brief")
     brand = state.get("brand")
     if not brief or not brand:
-        # Nothing to scan yet — let the LLM proceed.
         return None
 
     prohibited = brand.get("legal", {}).get("prohibited_words", [])
-    messages = brief.get("campaign_message", {})
+    messages = _collect_messages(brief)
     hits = _scan_prohibited_words(messages, prohibited)
     if hits:
         details = "; ".join(f"{loc!r}={word!r} in {msg!r}" for loc, word, msg in hits)
         raise LegalViolation(
-            f"Prohibited word(s) detected in campaign_message — halting before image generation: {details}"
+            f"Prohibited word(s) detected in campaign messages — halting before image generation: {details}"
         )
     logger.info("legal_precheck_callback: no prohibited words found")
     return None

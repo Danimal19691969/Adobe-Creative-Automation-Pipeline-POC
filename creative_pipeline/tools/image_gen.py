@@ -50,7 +50,8 @@ def generate_hero_image(prompt: str, out_path: str, aspect_ratio: str = "1:1") -
         aspect_ratio: One of "1:1", "9:16", "16:9". Defaults to "1:1".
 
     Returns:
-        A dict with keys: path (str), latency_ms (int), model (str).
+        A dict with keys: path (str), latency_ms (int), model (str), provider (str),
+        asset_source (str — e.g. "openai_generated" or "imagen_generated").
     """
     image_provider = _resolve_image_provider()
     if image_provider not in _IMAGE_BACKENDS:
@@ -62,4 +63,8 @@ def generate_hero_image(prompt: str, out_path: str, aspect_ratio: str = "1:1") -
     if not os.environ.get(key_env):
         raise ValueError(f"IMAGE_PROVIDER={image_provider} requires {key_env}")
     model = os.environ.get(model_env, default_model)
-    return fn(prompt=prompt, out_path=out_path, aspect_ratio=aspect_ratio, model=model)
+    result = fn(prompt=prompt, out_path=out_path, aspect_ratio=aspect_ratio, model=model)
+    # Augment with provenance fields the report needs.
+    result.setdefault("provider", image_provider)
+    result.setdefault("asset_source", f"{image_provider}_generated")
+    return result

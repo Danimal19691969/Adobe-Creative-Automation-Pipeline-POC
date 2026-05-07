@@ -1,7 +1,7 @@
 campaign_id: summer_refresh_2025
 campaign_name: Summer Refresh 2025
 brand_id: aquacorp_global
-language: en
+language: es # choose language es (spanish), en (english), or pt (portuguese) for this campaign. This will influence the language of the generated copy and any region-specific cultural cues in the imagery.
 localized_copy: false
 localized_legal_copy: false
 force_generate_hero: true
@@ -20,9 +20,24 @@ generation_palette_hint: cyan, deep navy, clean white, fresh water tones, bright
   highlights, soft sky and ocean cues
 campaign_message: Refresh your summer, naturally.
 campaign_message_localized:
-  en: Refresh your summer, naturally.
-  es: Refresca tu verano, naturalmente.
-  pt: "Renove seu ver\xE3o, naturalmente."
+  en: Refresh your summer, naturally. # english
+  es: Refresca tu verano, naturalmente. # spanish
+  pt: "Renove seu ver\xE3o, naturalmente." # portuguese
+
+# Campaign-specific disclaimer override. When set, wins over the brand's
+# legal.default_disclaimer / legal.required_disclaimers. Use this for
+# campaign-specific copy ("Sale ends 12/31", "While supplies last");
+# leave it unset to keep the brand's compliance boilerplate. Both fields
+# are optional.
+#
+# Example:
+#   disclaimer_text: "Promotion ends August 31, 2025."
+#   disclaimer_text_localized:
+#     MX: "Promoción válida hasta el 31 de agosto de 2025."
+#     BR: "Promoção válida até 31 de agosto de 2025."
+#     CO: "Promoción válida hasta el 31 de agosto de 2025."
+disclaimer_text: null
+disclaimer_text_localized: {}
 products:
 - id: aquavita_sparkling
   name: AquaVita Sparkling Water
@@ -57,22 +72,21 @@ products:
   category: skincare
   description: Reef-safe broad-spectrum sunscreen for active outdoor use
   prompt_keywords:
-  - premium reef-safe sunscreen product photography
+  - premium sunscreen and skincare product photography
   - realistic SPF 50 white pump bottle hero with clean highlights
-  - sunlit poolside resort setting with pale stone surface
-  - soft turquoise pool water and blurred palm shadows
-  - fresh aloe leaf, mineral sunscreen texture, and subtle water droplets
-  - bright clean summer light with gentle reflections
-  - product positioned center-right with clear silhouette
+  - beach towel, sunlight, sand, and skincare lifestyle scene
+  - soft ocean background with warm summer beach atmosphere
+  - bright natural sunlight with gentle shadows and reflections
+  - shallow depth of field with product clearly in focus
+  - product positioned center-right with clean silhouette
   - clean left-side or lower-left negative space for copy overlay
-  - high-end skincare and outdoor wellness campaign style
-  prompt_avoid:
+  - high-end social campaign style
+
+prompt_avoid:
   - embedded text or words in the image
   - tiny fake label text
   - flat placeholder mockup
-  - "stock-photo clich\xE9"
-  - beach towels
-  - striped fabric
+  - stock-photo cliché
   - busy patterns behind the copy area
   - cluttered beach props
   - hands holding the product

@@ -75,15 +75,44 @@ class CreativeComposerAgent(BaseAgent):
                         or brief.campaign_message
                     )
             else:
-                # Localization disabled — single language, single message.
+                # Localization disabled — single-language run. ``brief.language``
+                # is authoritative: when it matches a key in
+                # ``campaign_message_localized``, that entry wins over the
+                # primary ``campaign_message``. This means a brief author
+                # can flip ``language: es`` and the rendered text follows
+                # without rewriting ``campaign_message`` — matching what
+                # the inline brief comment promises.
+                # Resolution order (most specific wins):
+                #   1. product.campaign_message                            (per-product override)
+                #   2. brief.campaign_message_localized[brief.language]    (NEW — language is a directive)
+                #   3. brief.campaign_message                              (fallback)
                 locale = brief.language
-                headline = product.campaign_message or brief.campaign_message
+                headline = (
+                    product.campaign_message
+                    or brief.campaign_message_localized.get(brief.language)
+                    or brief.campaign_message
+                )
 
-            # Disclaimer: localized only when the brief says so. Otherwise English default.
+            # Disclaimer resolution order (most specific wins):
+            #   1. brief.disclaimer_text_localized[market]            (when localized_legal_copy=True)
+            #   2. brief.disclaimer_text_localized[brief.language]    (fallback localized)
+            #   3. brand.legal.required_disclaimers[market]           (when localized_legal_copy=True)
+            #   4. brief.disclaimer_text                              (single-language brief override)
+            #   5. brand.legal.default_disclaimer                     (compliance boilerplate)
+            #
+            # The brief is intended to own campaign-specific copy
+            # ("Sale ends Dec 31"); brand legal stays as the fallback
+            # for compliance boilerplate the marketing team isn't
+            # rewriting per campaign.
+            disclaimer = None
             if brief.localized_legal_copy:
-                disclaimer = brand.legal.required_disclaimers.get(market) or brand.legal.default_disclaimer
-            else:
-                disclaimer = brand.legal.default_disclaimer
+                disclaimer = (
+                    brief.disclaimer_text_localized.get(market)
+                    or brief.disclaimer_text_localized.get(brief.language)
+                    or brand.legal.required_disclaimers.get(market)
+                )
+            if disclaimer is None:
+                disclaimer = brief.disclaimer_text or brand.legal.default_disclaimer
 
             for ratio in ratios:
                 out_path = output_path(output_dir, self.product_id, ratio, market, locale)

@@ -50,25 +50,163 @@ def fake_hero(tmp_path: Path) -> str:
 
 # -------- (a) English stays English when localized_copy=false --------
 
-def test_english_pinned_when_localized_copy_false(brand_yaml, brief_yaml):
+def test_english_pinned_when_localized_copy_false(brand_yaml):
     """When language=en and localized_copy=false, the resolved headline for
-    every market must be the brief's primary English campaign_message — never
-    Spanish/Portuguese, even though those locales exist in
-    campaign_message_localized."""
-    assert brief_yaml.language == "en"
-    assert brief_yaml.localized_copy is False
+    every market must be English — never Spanish/Portuguese, even though
+    those locales exist in campaign_message_localized.
 
-    # Simulate the composer's headline-resolution logic for every market.
-    for market in brief_yaml.markets:
-        # Per the composer: when localized_copy=false, locale = brief.language,
-        # headline = product.campaign_message or brief.campaign_message.
-        headline = brief_yaml.products[0].campaign_message or brief_yaml.campaign_message
-        locale = brief_yaml.language
-        assert locale == "en", f"market {market} must use 'en' when localized_copy=false"
+    Self-contained: builds its own brief instead of reading the project's
+    summer_refresh_2025.yaml so that flipping language in the live brief
+    doesn't break this contract test.
+    """
+    raw = {
+        "campaign_id": "en_test",
+        "campaign_name": "EN Test",
+        "brand_id": "aquacorp_global",
+        "language": "en",
+        "localized_copy": False,
+        "target_region": "LATAM",
+        "markets": ["MX", "BR", "CO"],
+        "target_audience": "test",
+        "creative_quality": "demo_polished",
+        "layout_template": "premium_product_hero",
+        "campaign_message": "Refresh your summer, naturally.",
+        "campaign_message_localized": {
+            "en": "Refresh your summer, naturally.",
+            "es": "Refresca tu verano, naturalmente.",
+            "pt": "Renove seu verão, naturalmente.",
+        },
+        "products": [{"id": "p1", "name": "P", "category": "x", "description": "y"}],
+    }
+    brief = CampaignBrief.model_validate(raw)
+    assert brief.language == "en"
+    assert brief.localized_copy is False
+
+    # Simulate the composer's headline resolution for every market.
+    for market in brief.markets:
+        # When localized_copy=false:
+        #   locale = brief.language
+        #   headline = product.campaign_message
+        #              or brief.campaign_message_localized[brief.language]
+        #              or brief.campaign_message
+        headline = (
+            brief.products[0].campaign_message
+            or brief.campaign_message_localized.get(brief.language)
+            or brief.campaign_message
+        )
+        locale = brief.language
+        assert locale == "en", f"market {market} must use 'en'"
         assert headline == "Refresh your summer, naturally."
         # Spanish/Portuguese strings must not leak into the English-only run.
         assert "verano" not in headline.lower()
         assert "verão" not in headline.lower()
+
+
+def test_brief_language_drives_headline_when_localized_copy_false(brand_yaml):
+    """The user-facing contract for fix #3: setting ``brief.language`` to
+    a locale present in ``campaign_message_localized`` must change the
+    rendered headline text in a single-language run, without requiring
+    the brief author to also rewrite ``campaign_message``."""
+    raw = {
+        "campaign_id": "es_test",
+        "campaign_name": "ES Test",
+        "brand_id": "aquacorp_global",
+        "language": "es",
+        "localized_copy": False,
+        "target_region": "LATAM",
+        "markets": ["MX", "BR", "CO"],
+        "target_audience": "test",
+        "creative_quality": "demo_polished",
+        "layout_template": "premium_product_hero",
+        "campaign_message": "Refresh your summer, naturally.",  # English fallback
+        "campaign_message_localized": {
+            "en": "Refresh your summer, naturally.",
+            "es": "Refresca tu verano, naturalmente.",
+            "pt": "Renove seu verão, naturalmente.",
+        },
+        "products": [{"id": "p1", "name": "P", "category": "x", "description": "y"}],
+    }
+    brief = CampaignBrief.model_validate(raw)
+
+    # Composer's resolution path (single-language branch):
+    headline = (
+        brief.products[0].campaign_message
+        or brief.campaign_message_localized.get(brief.language)
+        or brief.campaign_message
+    )
+    locale = brief.language
+    assert locale == "es"
+    assert headline == "Refresca tu verano, naturalmente."
+    # The English fallback must NOT win when an es entry exists.
+    assert "refresh" not in headline.lower()
+
+
+def test_brief_language_falls_back_to_campaign_message_when_locale_missing(brand_yaml):
+    """When ``brief.language`` is set to a locale that has no entry in
+    ``campaign_message_localized``, the composer falls back to
+    ``brief.campaign_message`` rather than failing — this preserves the
+    legacy behavior for briefs that haven't enumerated localized text."""
+    raw = {
+        "campaign_id": "fr_test",
+        "campaign_name": "FR Test",
+        "brand_id": "aquacorp_global",
+        "language": "fr",  # not in campaign_message_localized
+        "localized_copy": False,
+        "target_region": "EMEA",
+        "markets": ["FR"],
+        "target_audience": "test",
+        "creative_quality": "demo_polished",
+        "layout_template": "premium_product_hero",
+        "campaign_message": "Refresh your summer, naturally.",
+        # campaign_message_localized intentionally omitted
+        "products": [{"id": "p1", "name": "P", "category": "x", "description": "y"}],
+    }
+    brief = CampaignBrief.model_validate(raw)
+    headline = (
+        brief.products[0].campaign_message
+        or brief.campaign_message_localized.get(brief.language)
+        or brief.campaign_message
+    )
+    assert headline == "Refresh your summer, naturally."
+    assert brief.language == "fr"  # locale tag still flows through
+
+
+def test_brief_language_feeds_image_prompt_audience_clause(brand_yaml):
+    """``brief.language`` should also nudge the image-gen prompt so the
+    photography picks up cultural cues — fix #3 makes the field actually
+    do what the inline brief comment promises ("region-specific cultural
+    cues in the imagery")."""
+    raw = {
+        "campaign_id": "es_test",
+        "campaign_name": "ES Test",
+        "brand_id": "aquacorp_global",
+        "language": "es",
+        "localized_copy": False,
+        "target_region": "LATAM",
+        "markets": ["MX"],
+        "target_audience": "Health-conscious adults 25-40",
+        "creative_quality": "demo_polished",
+        "layout_template": "premium_product_hero",
+        "campaign_message": "Refresca tu verano, naturalmente.",
+        "products": [{
+            "id": "p1", "name": "P", "category": "beverage",
+            "description": "y", "prompt_keywords": ["clean shot"],
+        }],
+    }
+    brief = CampaignBrief.model_validate(raw)
+    prompt = build_prompt(brief.products[0], brief, brand_yaml)
+    assert "Spanish-speaking" in prompt, (
+        f"language=es should add a Spanish-audience cue to the image-gen "
+        f"prompt; got prompt:\n{prompt}"
+    )
+
+    # And language=en should produce the English-audience phrasing.
+    raw["language"] = "en"
+    raw["campaign_message"] = "Refresh your summer, naturally."
+    brief_en = CampaignBrief.model_validate(raw)
+    prompt_en = build_prompt(brief_en.products[0], brief_en, brand_yaml)
+    assert "English-speaking" in prompt_en
+    assert "Spanish-speaking" not in prompt_en
 
 
 def test_localized_copy_true_picks_per_market_locale(brand_yaml):

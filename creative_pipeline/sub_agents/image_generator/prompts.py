@@ -36,6 +36,22 @@ from creative_pipeline.schemas import (
 )
 
 
+# BCP-47-ish language code → audience-language phrase. Used to add a
+# cultural-cue clause to the image-gen prompt so ``brief.language`` isn't
+# inert metadata — flipping the brief's language now actually nudges the
+# generated photography (e.g. plating, signage style, complexion variety
+# for the LATAM Spanish-speaking audience). Codes not in this map fall
+# back to no extra clause.
+_LANGUAGE_AUDIENCE_PHRASING: dict[str, str] = {
+    "en": "English-speaking audience",
+    "es": "Spanish-speaking audience (LATAM / Iberian context)",
+    "pt": "Portuguese-speaking audience (Brazil / Iberian context)",
+    "fr": "French-speaking audience",
+    "de": "German-speaking audience",
+    "it": "Italian-speaking audience",
+}
+
+
 _PALETTE_INFLUENCE_PHRASING: dict[PaletteInfluence, str] = {
     PaletteInfluence.OFF: "",
     PaletteInfluence.LIGHT: "Color direction (subtle): introduce a faint hint of ",
@@ -161,11 +177,17 @@ def build_prompt(
 
     composition_block = _composition_guidance_block(brand, brief, hero_aspect_ratio_label)
 
+    audience_phrase = _LANGUAGE_AUDIENCE_PHRASING.get(brief.language.lower(), "")
+    audience_clause = (
+        f"Audience cue: {brief.target_audience}, region {brief.target_region}"
+        + (f", {audience_phrase}" if audience_phrase else "")
+    )
+
     parts = [
         "Premium social media campaign hero photograph",
         f"Subject: a {product.category} product, depicted via the visual elements below",
         keyword_clause,
-        f"Audience cue: {brief.target_audience}, region {brief.target_region}",
+        audience_clause,
         f"Mood: {brand.imagery_style.mood}",
         f"Personality: {', '.join(brand.voice_and_tone.personality)}",
         f"Style: {brand.imagery_style.style_prompt_suffix}",

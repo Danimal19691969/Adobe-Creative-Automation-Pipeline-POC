@@ -117,8 +117,11 @@ def test_hard_caps_mark_extreme_candidate_non_viable(brand_yaml, tmp_path):
     would otherwise be lower."""
     custom = brand_yaml.model_copy(deep=True)
     layout = custom.layout_templates["premium_product_hero"]
-    # Tight caps so the busy stripes are over the bar.
+    # Tight caps so the busy stripes are over the bar. Disable near-miss
+    # hard-fail for this isolation test — we're verifying edge-density
+    # rejection independently of clearance rules.
     layout.text_region_max_edge_density = 0.04
+    layout.hard_fail_text_object_near_miss = False
 
     cropped = Image.open(_make_split_with_focal_right(tmp_path)).convert("RGBA")
     pa = PerAspectLayout(
@@ -152,7 +155,7 @@ def test_fitter_respects_max_line_count(tmp_path):
     draw = ImageDraw.Draw(canvas)
     long_headline = "Refresh your summer with this remarkable natural sparkling water today"
 
-    font, lines, total_h, scale_reason = _fit_text_with_pixel_bounds(
+    font, lines, total_h, scale_reason, wrap_strategy = _fit_text_with_pixel_bounds(
         draw, long_headline,
         font_filename="Montserrat-Bold.ttf",
         fonts_dir="fonts",
@@ -166,12 +169,13 @@ def test_fitter_respects_max_line_count(tmp_path):
     )
     assert len(lines) <= 3
     assert "lines" in scale_reason or "fitting" in scale_reason
+    assert wrap_strategy in ("greedy", "balanced")
 
 
 def test_fitter_returns_scale_reason_string(tmp_path):
     canvas = Image.new("RGB", (400, 400))
     draw = ImageDraw.Draw(canvas)
-    font, lines, total_h, scale_reason = _fit_text_with_pixel_bounds(
+    font, lines, total_h, scale_reason, wrap_strategy = _fit_text_with_pixel_bounds(
         draw, "Hi there",
         font_filename="Montserrat-Bold.ttf",
         fonts_dir="fonts",
@@ -182,6 +186,7 @@ def test_fitter_returns_scale_reason_string(tmp_path):
     )
     assert isinstance(scale_reason, str)
     assert scale_reason  # non-empty
+    assert wrap_strategy in ("greedy", "balanced")
 
 
 # -------- End-to-end meta fields --------

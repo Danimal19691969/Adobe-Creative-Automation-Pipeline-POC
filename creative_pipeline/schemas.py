@@ -125,6 +125,19 @@ class VisualIdentity(BaseModel):
     accent_colors: list[str] = Field(default_factory=list)
     logo_path: str
     logo_placement: LogoPlacement
+    # Composer iterates this list (in order) when the configured
+    # ``logo_placement`` collides with the focal/product safe zone.
+    # Empty list = legacy fixed-placement behavior.
+    logo_allowed_positions: list[LogoPlacement] = Field(default_factory=list)
+    # Logo must keep this much breathing room from the focal/product safe
+    # zone. ``logo_product_clearance_pct`` is a fraction of min(W, H);
+    # ``min_logo_product_gap_px`` per aspect is the absolute floor.
+    logo_product_clearance_pct: float = Field(default=0.035, ge=0.0, le=0.30)
+    min_logo_product_gap_px: dict[str, int] = Field(default_factory=dict)
+    # When True, a logo bbox that overlaps or near-misses the focal safe
+    # zone makes the configured placement non-viable; composer falls back
+    # to the next entry in ``logo_allowed_positions``.
+    hard_fail_logo_product_collision: bool = True
     safe_zone_pct: float = Field(ge=0.0, le=0.5)
     logo_height_pct: float = Field(default=0.10, gt=0.0, le=0.5)
     # Logo treatment: plain paste vs. soft brand-color badge behind the mark.
@@ -348,6 +361,71 @@ class LayoutTemplate(BaseModel):
     min_text_object_gap_px: dict[str, int] = Field(default_factory=dict)
     object_clearance_penalty: float = Field(default=0.65, ge=0.0, le=2.0)
     hard_fail_text_object_collision: bool = True
+    # Near-miss = rendered text bbox sits within ``min_text_object_gap_px``
+    # of the unexpanded focal safe zone (no overlap, but visually too close).
+    # When true, the composer treats near-miss the same as collision: the
+    # candidate is non-viable when alternatives exist, and the post-render
+    # shift cascade tries to widen the gap before settling.
+    hard_fail_text_object_near_miss: bool = True
+
+    # Crop safety / anti-clipping. The composer scores several crop offsets
+    # (constrained by source aspect / target aspect mismatch) and rejects
+    # ones whose focal/product cluster lands within
+    # ``focal_edge_clearance_pct * min(W, H)`` or ``min_focal_edge_gap_px``
+    # of any canvas edge.
+    focal_edge_clearance_pct: float = Field(default=0.045, ge=0.0, le=0.30)
+    min_focal_edge_gap_px: dict[str, int] = Field(default_factory=dict)
+    hard_fail_focal_edge_clip: bool = True
+    crop_edge_clip_penalty: float = Field(default=0.90, ge=0.0, le=2.0)
+
+    # Accent rail / underline left-right safe margin. The accent shape
+    # cannot cross within ``min_accent_edge_gap_px`` (or
+    # ``accent_safe_zone_pct * min(W, H)``) of the canvas edge.
+    accent_safe_zone_pct: float = Field(default=0.06, ge=0.0, le=0.20)
+    min_accent_edge_gap_px: dict[str, int] = Field(default_factory=dict)
+
+    # Disclaimer candidate boxes (per aspect) — composer scores these for
+    # contrast and focal-clearance and picks the best. First box is the
+    # configured preference; subsequent ones are alternates.
+    disclaimer_candidate_boxes: dict[str, list[tuple[float, float, float, float]]] = (
+        Field(default_factory=dict)
+    )
+    min_disclaimer_object_gap_px: dict[str, int] = Field(default_factory=dict)
+
+    # Adaptive headline-box widening: after the candidate scorer picks
+    # a winner, the composer can extend it toward the focal safe zone
+    # (up to ``min_text_object_gap_px`` of clearance). The total widen
+    # is capped at ``headline_widen_max_pct * canvas_width`` so a
+    # pathologically far-right focal cluster doesn't make the headline
+    # zone span the entire frame. Set to 0 to disable widening.
+    headline_widen_max_pct: float = Field(default=0.10, ge=0.0, le=0.30)
+
+    # Hero-scale threshold for the fitter. When greedy wrap produces
+    # single-word lines on a multi-word headline (e.g. narrow box +
+    # long words), the fitter normally prefers a smaller font that
+    # produces multi-word lines — but if NO size in [min, max] avoids
+    # single-word lines, sizes ≥ this threshold are treated as
+    # intentional poster-typography and ranked above smaller "tidy"
+    # alternatives. Set to a very high number (>= ``headline_max``) to
+    # disable the threshold and always prefer multi-word lines when
+    # achievable; set to 0 to always prefer the largest font.
+    headline_hero_scale_threshold_px: int = Field(default=80, ge=0)
+
+    # Letterbox fallback for unavoidable focal-edge clipping.
+    # When every crop offset still clips the focal cluster against a
+    # canvas edge, the composer can fit the entire source onto a
+    # neutral-color canvas instead of cropping. Disabled by default
+    # for backwards compatibility with the legacy crop-only flow.
+    enable_focal_letterbox_when_clip_unavoidable: bool = False
+    # Color role for the letterbox fill:
+    #   "auto"          — sample median edge color, snap to brand if close
+    #   "brand_primary" / "brand_secondary" / "brand_accent" — literal brand color
+    #   "sampled_edge"  — sample only, no brand snap
+    letterbox_color_role: str = Field(default="auto")
+    # Maximum letterbox pad as a fraction of min(W, H). When the pad
+    # required to clear focal exceeds this cap, the composer skips
+    # letterboxing and keeps the legacy clipping behavior.
+    letterbox_max_pad_pct: float = Field(default=0.08, ge=0.0, le=0.30)
 
     text_align_default: TextAlign = TextAlign.CENTER
     per_aspect: dict[str, PerAspectLayout] = Field(default_factory=dict)
@@ -503,6 +581,20 @@ class CampaignBrief(BaseModel):
     campaign_message: str = Field(min_length=1)
     # Optional locale-keyed override map (rendered when localized_copy=True).
     campaign_message_localized: dict[str, str] = Field(default_factory=dict)
+
+    # Campaign-specific disclaimer override. When set, this wins over
+    # ``brand.legal.default_disclaimer`` / ``brand.legal.required_disclaimers``.
+    # Brand legal text remains the fallback when neither field is provided
+    # (compliance boilerplate).
+    #   - ``disclaimer_text`` (single-language) is rendered when
+    #     ``localized_legal_copy=False`` (the default).
+    #   - ``disclaimer_text_localized`` is a per-market override map and is
+    #     consulted (per market, then per language) when
+    #     ``localized_legal_copy=True``.
+    # Both are optional; when both are absent the composer falls back to
+    # the brand-level legal copy as before.
+    disclaimer_text: Optional[str] = None
+    disclaimer_text_localized: dict[str, str] = Field(default_factory=dict)
 
     products: list[Product] = Field(min_length=1)
 

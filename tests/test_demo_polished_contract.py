@@ -137,6 +137,11 @@ def test_regenerate_cached_assets_off_reuses_generated_cache(tmp_path, monkeypat
 def test_dispatcher_returns_provider_and_asset_source(monkeypatch):
     monkeypatch.delenv("PROVIDER", raising=False)
     monkeypatch.delenv("IMAGE_PROVIDER", raising=False)
+    # IMAGE_MODEL must be cleared too: package init now loads .env with
+    # override=True, so any IMAGE_MODEL set in the project's .env
+    # (e.g. gemini-2.5-flash-image) leaks into the test process and
+    # would override the backend's default model below.
+    monkeypatch.delenv("IMAGE_MODEL", raising=False)
     monkeypatch.setenv("IMAGE_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
@@ -211,6 +216,146 @@ def test_localized_legal_copy_false_uses_default_in_every_market(brand_yaml, tmp
         assert o["disclaimer_text"] == "Terms and conditions apply."
         assert "Aplican" not in o["disclaimer_text"]
         assert "Consulte" not in o["disclaimer_text"]
+
+
+def test_brief_disclaimer_text_overrides_brand_default(brand_yaml, tmp_path, monkeypatch):
+    """Campaign-specific disclaimer set on the brief wins over
+    ``brand.legal.default_disclaimer`` when ``localized_legal_copy=False``.
+    Brand legal stays as compliance fallback for briefs that don't set it."""
+    pid = "p1"
+    monkeypatch.chdir(tmp_path)
+    asset_dir = tmp_path / "inputs" / "assets" / pid
+    asset_dir.mkdir(parents=True)
+    hero = asset_dir / "hero.png"
+    Image.new("RGB", (200, 200), (255, 255, 255)).save(hero)
+
+    brief_dict = {
+        "campaign_id": "c", "campaign_name": "C", "brand_id": brand_yaml.brand_id,
+        "language": "en", "localized_copy": False, "localized_legal_copy": False,
+        "force_generate_hero": False, "regenerate_cached_assets": False,
+        "target_region": "LATAM", "markets": ["MX", "BR", "CO"], "target_audience": "x",
+        "creative_quality": "demo_polished",
+        "layout_template": next(iter(brand_yaml.layout_templates.keys())),
+        "campaign_message": "Refresh your summer, naturally.",
+        "disclaimer_text": "Promotion ends August 31, 2025.",
+        "products": [{"id": pid, "name": "P", "category": "x", "description": "y"}],
+    }
+    brief = CampaignBrief.model_validate(brief_dict)
+    agent = CreativeComposerAgent(name="CC", product_id=pid)
+    state = {
+        "brand": brand_yaml.model_dump(mode="json"),
+        "brief": brief.model_dump(mode="json"),
+        f"product:{pid}": {"hero_path": str(hero), "asset_source": "user_supplied", "used_cache": True},
+    }
+
+    async def go():
+        deltas: dict = {}
+        async for event in agent._run_async_impl(_FakeCtx(state)):
+            if event.actions and event.actions.state_delta:
+                deltas.update(event.actions.state_delta)
+        return deltas
+
+    delta = asyncio.run(go())
+    outputs = delta[f"product:{pid}"]["outputs"]
+    # Brief override must win in every market — the brand's default
+    # ("Terms and conditions apply.") is the fallback, not the override.
+    for o in outputs:
+        assert o["disclaimer_text"] == "Promotion ends August 31, 2025."
+        assert "Terms and conditions" not in o["disclaimer_text"]
+
+
+def test_brief_disclaimer_localized_overrides_brand_required(brand_yaml, tmp_path, monkeypatch):
+    """When ``localized_legal_copy=True``, brief.disclaimer_text_localized[market]
+    wins over brand.legal.required_disclaimers[market]."""
+    pid = "p1"
+    monkeypatch.chdir(tmp_path)
+    asset_dir = tmp_path / "inputs" / "assets" / pid
+    asset_dir.mkdir(parents=True)
+    hero = asset_dir / "hero.png"
+    Image.new("RGB", (200, 200), (255, 255, 255)).save(hero)
+
+    brief_dict = {
+        "campaign_id": "c", "campaign_name": "C", "brand_id": brand_yaml.brand_id,
+        "language": "en", "localized_copy": True, "localized_legal_copy": True,
+        "force_generate_hero": False, "regenerate_cached_assets": False,
+        "target_region": "LATAM", "markets": ["MX", "BR"], "target_audience": "x",
+        "creative_quality": "demo_polished",
+        "layout_template": next(iter(brand_yaml.layout_templates.keys())),
+        "campaign_message": "Refresh your summer, naturally.",
+        "campaign_message_localized": {"en": "Refresh your summer, naturally."},
+        "disclaimer_text_localized": {
+            "MX": "Promoción válida hasta el 31 de agosto.",
+            "BR": "Promoção válida até 31 de agosto.",
+        },
+        "products": [{"id": pid, "name": "P", "category": "x", "description": "y"}],
+    }
+    brief = CampaignBrief.model_validate(brief_dict)
+    agent = CreativeComposerAgent(name="CC", product_id=pid)
+    state = {
+        "brand": brand_yaml.model_dump(mode="json"),
+        "brief": brief.model_dump(mode="json"),
+        f"product:{pid}": {"hero_path": str(hero), "asset_source": "user_supplied", "used_cache": True},
+    }
+
+    async def go():
+        deltas: dict = {}
+        async for event in agent._run_async_impl(_FakeCtx(state)):
+            if event.actions and event.actions.state_delta:
+                deltas.update(event.actions.state_delta)
+        return deltas
+
+    delta = asyncio.run(go())
+    outputs = delta[f"product:{pid}"]["outputs"]
+    by_market = {o["market"]: o["disclaimer_text"] for o in outputs}
+    assert "Promoción" in by_market["MX"]
+    assert "Promoção" in by_market["BR"]
+    # The brand-level required_disclaimers ("Aplican términos…") is the
+    # fallback when the brief doesn't override that market — but here
+    # both markets are overridden, so brand legal is silent.
+    assert "Aplican" not in by_market["MX"]
+    assert "Consulte" not in by_market["BR"]
+
+
+def test_brand_legal_falls_back_when_brief_silent(brand_yaml, tmp_path, monkeypatch):
+    """When neither ``brief.disclaimer_text`` nor
+    ``brief.disclaimer_text_localized`` is set, the composer falls back
+    to brand.legal — the compliance boilerplate stays as the safety net."""
+    pid = "p1"
+    monkeypatch.chdir(tmp_path)
+    asset_dir = tmp_path / "inputs" / "assets" / pid
+    asset_dir.mkdir(parents=True)
+    hero = asset_dir / "hero.png"
+    Image.new("RGB", (200, 200), (255, 255, 255)).save(hero)
+
+    brief_dict = {
+        "campaign_id": "c", "campaign_name": "C", "brand_id": brand_yaml.brand_id,
+        "language": "en", "localized_copy": False, "localized_legal_copy": False,
+        "force_generate_hero": False, "regenerate_cached_assets": False,
+        "target_region": "LATAM", "markets": ["MX"], "target_audience": "x",
+        "creative_quality": "demo_polished",
+        "layout_template": next(iter(brand_yaml.layout_templates.keys())),
+        "campaign_message": "Refresh your summer, naturally.",
+        # no disclaimer_text, no disclaimer_text_localized
+        "products": [{"id": pid, "name": "P", "category": "x", "description": "y"}],
+    }
+    brief = CampaignBrief.model_validate(brief_dict)
+    agent = CreativeComposerAgent(name="CC", product_id=pid)
+    state = {
+        "brand": brand_yaml.model_dump(mode="json"),
+        "brief": brief.model_dump(mode="json"),
+        f"product:{pid}": {"hero_path": str(hero), "asset_source": "user_supplied", "used_cache": True},
+    }
+
+    async def go():
+        deltas: dict = {}
+        async for event in agent._run_async_impl(_FakeCtx(state)):
+            if event.actions and event.actions.state_delta:
+                deltas.update(event.actions.state_delta)
+        return deltas
+
+    delta = asyncio.run(go())
+    outputs = delta[f"product:{pid}"]["outputs"]
+    assert outputs[0]["disclaimer_text"] == brand_yaml.legal.default_disclaimer
 
 
 def test_localized_legal_copy_true_uses_per_market_text(brand_yaml, tmp_path, monkeypatch):

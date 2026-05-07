@@ -142,16 +142,38 @@ class ReportingAgent(BaseAgent):
                     "headline_region_edge_density": o.get("headline_region_edge_density"),
                     "headline_region_contrast_estimate": o.get("headline_region_contrast_estimate"),
                     "headline_color_selected": o.get("headline_color_selected"),
+                    "headline_color_candidates": o.get("headline_color_candidates"),
+                    "headline_color_selection_reason": o.get("headline_color_selection_reason"),
                     "headline_wrap_variant": o.get("headline_wrap_variant"),
                     "headline_scale_reason": o.get("headline_scale_reason"),
                     "headline_fit_status": o.get("headline_fit_status"),
-                    # Prominence score (chosen size / configured ceiling).
+                    "headline_font_size_px": o.get("headline_font_size_px"),
+                    # Rendered text bbox — the actual on-canvas text area
+                    # (post-wrap, post-alignment), distinct from the wider
+                    # candidate headline_box. QC and the prominence score
+                    # both sample under this bbox.
+                    "rendered_headline_bbox": o.get("rendered_headline_bbox"),
+                    "rendered_headline_bbox_pct": o.get("rendered_headline_bbox_pct"),
+                    # Prominence score (weighted: size + zone fill + line +
+                    # fit + contrast + clearance). Components surfaced too
+                    # so reviewers can see which factor dominates a low score.
                     "headline_prominence_score": o.get("headline_prominence_score"),
+                    "headline_size_factor": o.get("headline_size_factor"),
+                    "headline_zone_fill_factor": o.get("headline_zone_fill_factor"),
+                    "headline_line_factor": o.get("headline_line_factor"),
+                    "headline_fit_factor": o.get("headline_fit_factor"),
+                    "headline_contrast_factor": o.get("headline_contrast_factor"),
+                    "headline_clearance_factor": o.get("headline_clearance_factor"),
                     "headline_max_size_px_configured": o.get("headline_max_size_px_configured"),
                     "headline_min_size_px_configured": o.get("headline_min_size_px_configured"),
                     "headline_target_h_px": o.get("headline_target_h_px"),
+                    "headline_target_zone_fill_pct": o.get("headline_target_zone_fill_pct"),
                     "headline_box_candidates": o.get("headline_box_candidates"),
-                    # Focal-area / product safe-zone audit.
+                    # Focal-area / product safe-zone audit. ``text_object_*``
+                    # fields reflect the *rendered* text bbox vs the focal
+                    # safe zone — not the candidate box. Collision and
+                    # near-miss are both composition failures even when no
+                    # direct overlap exists.
                     "focal_area_estimate": o.get("focal_area_estimate"),
                     "product_safe_zone_box": o.get("product_safe_zone_box"),
                     "expanded_product_safe_zone_box": o.get("expanded_product_safe_zone_box"),
@@ -160,13 +182,67 @@ class ReportingAgent(BaseAgent):
                     "focal_overlap_pct": o.get("focal_overlap_pct"),
                     "text_object_gap_px": o.get("text_object_gap_px"),
                     "text_object_clearance_pass": o.get("text_object_clearance_pass"),
-                    # Headline-box adjustment audit.
+                    "text_object_collision_detected": o.get("text_object_collision_detected"),
+                    "text_object_near_miss_detected": o.get("text_object_near_miss_detected"),
+                    "all_candidates_failed_clearance": o.get("all_candidates_failed_clearance"),
+                    "clearance_failure_reason": o.get("clearance_failure_reason"),
+                    "min_text_object_gap_px_threshold": o.get("min_text_object_gap_px_threshold"),
+                    # Headline-box adjustment audit. Includes every shift the
+                    # cascade tried (accepted or not) and the final box.
                     "headline_box_original": o.get("headline_box_original"),
                     "headline_box_adjusted": o.get("headline_box_adjusted"),
                     "headline_box_adjustment_reason": o.get("headline_box_adjustment_reason"),
+                    "headline_box_shift_attempts": o.get("headline_box_shift_attempts"),
+                    "headline_box_shift_success": o.get("headline_box_shift_success"),
                     # Disclaimer clearance audit.
                     "disclaimer_text_object_gap_px": o.get("disclaimer_text_object_gap_px"),
                     "disclaimer_clearance_pass": o.get("disclaimer_clearance_pass"),
+                    "disclaimer_position_selected": o.get("disclaimer_position_selected"),
+                    "disclaimer_position_configured": o.get("disclaimer_position_configured"),
+                    "disclaimer_candidate_index": o.get("disclaimer_candidate_index"),
+                    "disclaimer_candidate_attempts": o.get("disclaimer_candidate_attempts"),
+                    "disclaimer_selection_reason": o.get("disclaimer_selection_reason"),
+                    # Crop / anti-clip audit.
+                    "crop_strategy_used": o.get("crop_strategy_used"),
+                    "crop_box_used": o.get("crop_box_used"),
+                    "crop_box_candidates": o.get("crop_box_candidates"),
+                    "crop_box_scores": o.get("crop_box_scores"),
+                    "focal_edge_gap_px": o.get("focal_edge_gap_px"),
+                    "focal_edge_min_gap_px": o.get("focal_edge_min_gap_px"),
+                    "focal_edge_clearance_pass": o.get("focal_edge_clearance_pass"),
+                    "focal_edge_clip_detected": o.get("focal_edge_clip_detected"),
+                    "focal_edges_touched": o.get("focal_edges_touched"),
+                    "crop_edge_clip_penalty_applied": o.get("crop_edge_clip_penalty_applied"),
+                    # Letterbox fallback audit.
+                    "letterbox_applied": o.get("letterbox_applied"),
+                    "letterbox_pad_pct": o.get("letterbox_pad_pct"),
+                    "letterbox_color_used": o.get("letterbox_color_used"),
+                    "letterbox_color_source": o.get("letterbox_color_source"),
+                    # Headline wrap + adaptive widening audit.
+                    "headline_wrap_strategy": o.get("headline_wrap_strategy"),
+                    "headline_box_widened": o.get("headline_box_widened"),
+                    "headline_box_width_delta_pct": o.get("headline_box_width_delta_pct"),
+                    "headline_box_pre_widen_pct": o.get("headline_box_pre_widen_pct"),
+                    "headline_widen_reason": o.get("headline_widen_reason"),
+                    # Logo placement audit.
+                    "logo_position_selected": o.get("logo_position_selected"),
+                    "logo_position_configured": o.get("logo_position_configured"),
+                    "logo_position_adjusted": o.get("logo_position_adjusted"),
+                    "logo_product_gap_px": o.get("logo_product_gap_px"),
+                    "logo_product_clearance_pass": o.get("logo_product_clearance_pass"),
+                    "logo_collision_detected": o.get("logo_collision_detected"),
+                    "logo_selection_reason": o.get("logo_selection_reason"),
+                    "logo_position_attempts": o.get("logo_position_attempts"),
+                    "logo_min_required_gap_px": o.get("logo_min_required_gap_px"),
+                    # Accent safe-zone audit.
+                    "accent_line_box": o.get("accent_line_box"),
+                    "accent_edge_gap_px": o.get("accent_edge_gap_px"),
+                    "accent_safe_zone_pass": o.get("accent_safe_zone_pass"),
+                    # Composition score: aggregate health for this output
+                    # plus a machine-readable warning list.
+                    "composition_score": o.get("composition_score"),
+                    "composition_warnings": o.get("composition_warnings"),
+                    "composition_factors": o.get("composition_factors"),
                     # Disclaimer-contrast QC (set when required_brand_checks.disclaimer_contrast is true).
                     "disclaimer_contrast_ratio": qc.get("disclaimer_contrast_ratio"),
                     "disclaimer_wcag_level": qc.get("disclaimer_wcag_level"),

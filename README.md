@@ -56,6 +56,19 @@ IMAGE_MODEL=             # override default for the image backend
 
 Strict coupling: Imagen 3 fires **only** when `IMAGE_PROVIDER=google`; gpt-image-1 fires **only** when `IMAGE_PROVIDER=openai`. There is no silent fallback.
 
+`.env` is authoritative. The package init ([creative_pipeline/__init__.py](creative_pipeline/__init__.py)) loads `.env` from a pinned path next to the package and passes `override=True`, so:
+
+- the file is found even when `adk web` / `pytest` / scripts are launched from a different working directory,
+- values in `.env` win over any inherited shell env (`export PROVIDER=...` in your `~/.zshrc` no longer silently shadows the file).
+
+To verify which model the system actually resolved, look for this line on the first agent step:
+
+```
+creative_pipeline.tools.llm_factory INFO LLM resolved: provider=google (env) model=gemini-2.5-flash (env)
+```
+
+If you see `(default(openai))` or `(default(gpt-4o-mini))`, that means `.env` wasn't found and the in-code fallbacks fired — fix the file path or contents rather than re-running.
+
 | `PROVIDER` | `IMAGE_PROVIDER` (default) | Required keys |
 |---|---|---|
 | `openai` (default) | `openai` | `OPENAI_API_KEY` only |
@@ -64,6 +77,11 @@ Strict coupling: Imagen 3 fires **only** when `IMAGE_PROVIDER=google`; gpt-image
 | `anthropic` + `IMAGE_PROVIDER=openai` | `openai` (explicit) | `ANTHROPIC_API_KEY` + `OPENAI_API_KEY` |
 
 If `PROVIDER=anthropic` and `IMAGE_PROVIDER` is unset, the pipeline runs fine when all hero images are pre-cached but errors clearly the moment image generation is needed.
+
+#### Image-model name notes
+
+- `IMAGE_PROVIDER=google` calls Google's `predict` endpoint, which accepts **Imagen** models only (`imagen-3.0-generate-002`, `imagen-4.0-generate-001`, …). The Gemini-image model `gemini-2.5-flash-image` ("Nano Banana") uses a different API surface (`generate_content` with `response_modalities=["IMAGE"]`) and is **not** supported by this backend yet — setting `IMAGE_MODEL=gemini-2.5-flash-image` will return a 404 from the Imagen endpoint.
+- `IMAGE_PROVIDER=openai` defaults to `gpt-image-1`. Override via `IMAGE_MODEL`.
 
 ## Example Input
 
@@ -92,12 +110,25 @@ legal:
 ```yaml
 campaign_id: "summer_refresh_2025"
 brand_id: "aquacorp_global"
+language: en                  # primary language tag — directive (see § Language)
+localized_copy: false         # toggle: per-market fan-out across locales
+localized_legal_copy: false   # toggle: per-market legal text
 markets: ["MX", "BR", "CO"]
 target_audience: "Health-conscious adults 25-40"
-campaign_message:
+
+# Single-language headline (used when localized_copy=false). Localized
+# entries are consulted automatically when ``language`` matches a key.
+campaign_message: "Refresh your summer, naturally."
+campaign_message_localized:
   en: "Refresh your summer, naturally."
   es: "Refresca tu verano, naturalmente."
   pt: "Renove seu verão, naturalmente."
+
+# Optional campaign-specific disclaimer override; falls back to brand
+# legal when unset. See § Language and localization.
+disclaimer_text: null
+disclaimer_text_localized: {}
+
 products:
   - id: aquavita_sparkling
     name: "AquaVita Sparkling Water"
@@ -108,6 +139,52 @@ products:
     category: skincare
     description: "Reef-safe broad-spectrum sunscreen for active outdoor use"
 ```
+
+### Language and localization
+
+The brief has two orthogonal switches that together drive all language behavior:
+
+| Flag | Type | Effect |
+|---|---|---|
+| `language` | locale code (`en`, `es`, `pt`, `fr`, …) | Primary language directive. When ``localized_copy=false``, picks the entry from ``campaign_message_localized`` whose key matches; falls back to ``campaign_message`` if no match. Also drives the locale tag in output filenames (`MX_es.png`) and adds a language-aware audience clause to the image-gen prompt. |
+| `localized_copy` | bool | When `true`, the composer fans out per market using `brand.market_locales` to pick each market's locale and pull the headline from `campaign_message_localized[locale]`. When `false`, every market renders the single primary language. |
+
+Three common patterns:
+
+```yaml
+# 1. Single-language English campaign — most briefs land here.
+language: en
+localized_copy: false
+campaign_message: "Refresh your summer, naturally."
+# campaign_message_localized.en wins automatically; en/es/pt entries
+# below are kept as a translation library that becomes active if you
+# flip language or localized_copy later.
+
+# 2. Single-language Spanish campaign — flip ONE field.
+language: es
+localized_copy: false
+# Composer auto-pulls campaign_message_localized["es"] for every market,
+# so you don't rewrite campaign_message. The image-gen prompt also
+# gains a "Spanish-speaking audience (LATAM / Iberian context)" cue.
+
+# 3. Multi-locale fan-out — Spanish in MX/CO, Portuguese in BR.
+language: en
+localized_copy: true
+campaign_message_localized:
+  en: "Refresh your summer, naturally."
+  es: "Refresca tu verano, naturalmente."
+  pt: "Renove seu verão, naturalmente."
+# Output filenames: MX_es.png, BR_pt.png, CO_es.png.
+```
+
+**Disclaimer text** follows the same brief-first principle. Set
+`disclaimer_text` (or `disclaimer_text_localized` for per-market variants)
+on the brief to ship campaign-specific legal copy — "Promotion ends August
+31, 2025." or similar. When both are unset, the composer falls back to
+`brand.legal.default_disclaimer` / `brand.legal.required_disclaimers`,
+keeping compliance boilerplate as the safety net. Resolution order is
+brief-localized → brief-default → brand-localized → brand-default. Both
+fields are validated by the schema in [creative_pipeline/schemas.py](creative_pipeline/schemas.py).
 
 ## Example Output
 
@@ -245,7 +322,7 @@ root_agent (SequentialAgent)
 - **Image-gen backends:** Imagen 3 (`google`) and gpt-image-1 (`openai`). Anthropic has no native image API, so it requires `IMAGE_PROVIDER` to be set explicitly.
 - **Text placement is rule-based, not saliency- or vision-aware.** The composer picks per-aspect headline boxes from the layout template, records the resulting headline box and rendered text color in the report, and `QCCheckerAgent` then measures actual final-render contrast against the WCAG-style threshold. A production version could swap the rule-based placement for saliency detection or LLM vision to pick a clean text region — but the QC gate would continue to verify the result regardless of how the placement was chosen.
 - **Brand check is heuristic.** Palette distance (RGB Euclidean) + cv2 template matching pass-warn-fail thresholds are tuned for the demo brand; not human-grade.
-- **Localization is data-driven**, not LLM-translated. The brief carries `campaign_message` keyed by locale; `MARKET_TO_LOCALE` picks the right one per market with `en` fallback.
+- **Localization is data-driven**, not LLM-translated. The brief carries a single `campaign_message` (primary string) plus an optional `campaign_message_localized` map. `brief.language` is a directive — when it matches a key in `campaign_message_localized`, that entry wins for single-language runs. With `localized_copy: true`, `brand.market_locales` picks each market's locale with `brief.language` as fallback. The image-gen prompt receives a language-aware audience clause so the photography picks up cultural cues alongside the copy. See § *Language and localization*.
 - **Single-tenant; no auth.** Local runtime only.
 - **Brief topology is frozen at module import.** Changing `CAMPAIGN_BRIEF_PATH` or the brief's `products` list requires restarting `adk web` — the per-product `ParallelAgent` is built once.
 - **`adk web` chat input is ignored.** The root is a `SequentialAgent`, so any user message kicks the pipeline regardless of content. Reviewers should not expect natural-language routing.

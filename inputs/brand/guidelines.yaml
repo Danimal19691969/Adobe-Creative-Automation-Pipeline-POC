@@ -13,6 +13,19 @@ visual_identity:
   accent_colors: ["#90E0EF"]
   logo_path: "inputs/assets/global/logo.png"
   logo_placement: "top-right"
+  # When the configured placement crowds the focal/product area, the composer
+  # tries the alternates in this list (in order). Empty list = legacy
+  # behavior (fixed placement, no fallback).
+  logo_allowed_positions: ["top-right", "top-left", "bottom-right", "bottom-left"]
+  # Logo must keep this much breathing room from the focal/product safe
+  # zone. ``logo_product_clearance_pct`` is a fraction of min(W, H);
+  # ``min_logo_product_gap_px`` per aspect is the absolute floor.
+  logo_product_clearance_pct: 0.035
+  min_logo_product_gap_px:
+    "1x1": 36
+    "9x16": 42
+    "16x9": 48
+  hard_fail_logo_product_collision: true
   safe_zone_pct: 0.06
   logo_height_pct: 0.085
   logo_treatment: badge
@@ -41,9 +54,9 @@ typography:
       # *largest* fitting size in [min, max] subject to line-count bounds,
       # so raising max + raising target_zone_fill yields visibly larger
       # campaign copy on clean photography.
-      headline_min_font_size_px: 52
-      headline_max_font_size_px: 80
-      headline_target_zone_fill_pct: 0.62
+      headline_min_font_size_px: 56
+      headline_max_font_size_px: 96
+      headline_target_zone_fill_pct: 0.66
       preferred_line_count: 2
       disclaimer_min_font_size_px: 18
       disclaimer_max_font_size_px: 26
@@ -53,9 +66,9 @@ typography:
       # Candidate boxes pulled to the left third (x_max ≤ 0.52) and
       # taller (h≈0.24) so a 2-line hero headline at 90–100px reads as
       # confident campaign copy, not a caption.
-      headline_min_font_size_px: 60
-      headline_max_font_size_px: 100
-      headline_target_zone_fill_pct: 0.62
+      headline_min_font_size_px: 52
+      headline_max_font_size_px: 118
+      headline_target_zone_fill_pct: 0.68
       preferred_line_count: 2
       disclaimer_min_font_size_px: 20
       disclaimer_max_font_size_px: 28
@@ -67,9 +80,9 @@ typography:
       # ~110px on a 2-line headline within that budget. Object-clearance
       # gate still applies, so crowded photography won't push the headline
       # past the ceiling.
-      headline_min_font_size_px: 88
-      headline_max_font_size_px: 118
-      headline_target_zone_fill_pct: 0.78
+      headline_min_font_size_px: 86
+      headline_max_font_size_px: 132
+      headline_target_zone_fill_pct: 0.70
       preferred_line_count: 2
       # Legal must remain readable; previous 16:9 disclaimer was ~19px,
       # well into "microcopy" territory. Floor raised from 24 → 30 so the
@@ -197,53 +210,132 @@ layout_templates:
     # boxes that fall inside the expanded zone are penalized; ones inside
     # the *unexpanded* zone are hard-rejected when
     # ``hard_fail_text_object_collision`` is True.
-    object_text_clearance_pct: 0.035
+    object_text_clearance_pct: 0.045
     min_text_object_gap_px:
-      "1x1": 36
-      "9x16": 42
-      "16x9": 48
-    object_clearance_penalty: 0.65
+      "1x1": 52
+      "9x16": 56
+      "16x9": 64
+    object_clearance_penalty: 0.85
     hard_fail_text_object_collision: true
+    # Near-miss = rendered text bbox closer than min_text_object_gap_px to
+    # the unexpanded focal safe zone. When true, the candidate is hard-failed
+    # if any alternative passes; the composer also tries a sequence of
+    # deterministic shifts (left/up/down/narrow) on the rendered bbox before
+    # giving up on this candidate.
+    hard_fail_text_object_near_miss: true
+
+    # Crop safety / anti-clipping. Before composing, the composer scores
+    # several crop offsets and rejects ones that clip the focal/product
+    # cluster against a canvas edge. ``focal_edge_clearance_pct`` is a
+    # fraction of min(W, H); ``min_focal_edge_gap_px`` per aspect is the
+    # absolute floor.
+    focal_edge_clearance_pct: 0.045
+    min_focal_edge_gap_px:
+      "1x1": 48
+      "9x16": 56
+      "16x9": 64
+    hard_fail_focal_edge_clip: true
+    crop_edge_clip_penalty: 0.90
+
+    # Accent rail / underline must respect a left/right safe margin from
+    # the canvas edge so the brand mark doesn't hug the frame.
+    accent_safe_zone_pct: 0.065
+    min_accent_edge_gap_px:
+      "1x1": 48
+      "9x16": 52
+      "16x9": 56
+
+    # Disclaimer candidate boxes — composer scores them and picks the one
+    # with best contrast + clearance from focal/product. First candidate is
+    # the configured preference; subsequent ones are alternates the
+    # composer can fall back to when the preferred zone is crowded.
+    # Disclaimer candidate boxes are TIGHT corners (x_max − x_min ≈ 0.30
+    # of canvas width) so the right-aligned text actually hugs the
+    # corner instead of floating toward mid-bottom. A wider candidate
+    # box used to make "Terms and conditions apply." sit halfway across
+    # the frame because the text was right-aligned within a 0.40-wide
+    # box. Tight corners + right-alignment = visually anchored.
+    disclaimer_candidate_boxes:
+      "1x1":
+        - [0.66, 0.91, 0.94, 0.96]
+        - [0.06, 0.91, 0.34, 0.96]
+      "9x16":
+        - [0.62, 0.94, 0.94, 0.98]
+        - [0.06, 0.94, 0.38, 0.98]
+      "16x9":
+        - [0.72, 0.88, 0.96, 0.94]
+        - [0.05, 0.88, 0.30, 0.94]
+    min_disclaimer_object_gap_px:
+      "1x1": 32
+      "9x16": 36
+      "16x9": 42
+
+    # Adaptive headline-box widening: extend the chosen candidate toward
+    # the focal safe zone (up to min_text_object_gap_px clearance), capped
+    # at this fraction of canvas width. Set 0 to disable.
+    headline_widen_max_pct: 0.18
+
+    # Hero-scale threshold for the fitter. When the candidate box is so
+    # narrow that NO font size in [min, max] avoids single-word lines,
+    # sizes ≥ this threshold are preferred over smaller multi-word
+    # alternatives (poster typography vs. caption-sized copy). The
+    # non-choppy preference still wins when achievable.
+    headline_hero_scale_threshold_px: 80
+
+    # Letterbox fallback when no crop offset clears the focal cluster
+    # from the canvas edges. DISABLED for the demo brand: a colored matte
+    # border around the hero photo reads as "weird graphic box" on
+    # social campaign creatives, not as polished editorial work. When
+    # this brand's source heroes clip the focal product, the composer
+    # surfaces the issue via ``composition_warnings: ["focal_edge_clip"]``
+    # so reviewers can flag the source for re-prompting; the rendered
+    # creative continues to fill the whole canvas with photography.
+    #
+    # Set ``enable_focal_letterbox_when_clip_unavoidable: true`` for
+    # brands that prefer a framed look (typical for editorial print
+    # campaigns) — the rest of the letterbox knobs (color role, max pad)
+    # are honored when enabled.
+    enable_focal_letterbox_when_clip_unavoidable: false
+    letterbox_color_role: auto       # auto | brand_primary | brand_secondary | brand_accent | sampled_edge
+    letterbox_max_pad_pct: 0.08
 
     per_aspect:
       "1x1":
-        # headline_box is the single-zone fallback. headline_candidate_boxes
-        # is the preferred path: composer scores each box (contrast +
-        # texture stddev + Canny edge density + focal overlap) and picks
-        # the cleanest viable zone. Boxes are pulled to the left third so
-        # center/right product photography (e.g. a bottle in the middle of
-        # the frame) has at least one viable candidate sitting *outside*
-        # the product safe zone, and made tall enough (h≈0.28) to hold a
-        # confident 2-line headline within the per-aspect typography
-        # ceiling — small boxes were forcing timid 44px copy.
-        headline_box: [0.06, 0.60, 0.78, 0.92]
+        # x_min = 0.07 keeps a visible left safe margin; x_max held at
+        # ~0.45 so the headline clears a center/right-leaning focal
+        # product. Box height ≈ 0.30 of canvas (was 0.22) so a
+        # hero-scale 4-line single-word stack ("Refresh / your /
+        # summer, / naturally.") at ~80 px fits target_h when the box
+        # is too narrow for multi-word wraps.
+        headline_box: [0.07, 0.60, 0.78, 0.92]
         text_align: left
         headline_candidate_boxes:
-          - [0.05, 0.16, 0.42, 0.44]   # upper-left
-          - [0.05, 0.38, 0.42, 0.66]   # mid-left
-          - [0.05, 0.58, 0.42, 0.86]   # lower-left
+          - [0.07, 0.20, 0.45, 0.50]   # upper-left clean zone (preferred)
+          - [0.07, 0.32, 0.46, 0.62]   # mid-left
+          - [0.07, 0.46, 0.46, 0.76]   # lower-left
         avoid_busy_regions: true
         busy_region_penalty: 0.35
         object_overlap_penalty: 0.45
         min_contrast_precheck: 3.0
         min_line_count: 2
-        max_line_count: 3
+        max_line_count: 4
 
       "9x16":
-        # Left-third candidates so a center-positioned bottle does not
-        # collide with any candidate. Boxes are 0.24 high so a 2-line
-        # headline at 90–100px reads as confident campaign copy. Lower-left
-        # candidate is slightly wider (x_max=0.52) because the tall canvas
-        # allows more breathing room from the bottom focal area.
-        headline_box: [0.06, 0.64, 0.94, 0.92]
+        # Same upper-bias + 0.07 left-margin policy. Box height ≈ 0.30
+        # of canvas (was 0.22) so the fitter has room to choose a
+        # hero-scale single-word stack on narrow heroes (the only
+        # alternative when the box can't fit "Refresh your" on one
+        # line). max_line_count raised to 4 so a clean 4-line poster
+        # wrap is in-bounds, not min_floor_overflow.
+        headline_box: [0.07, 0.64, 0.94, 0.92]
         text_align: left
         headline_candidate_boxes:
-          - [0.05, 0.18, 0.48, 0.42]
-          - [0.05, 0.42, 0.48, 0.66]
-          - [0.05, 0.60, 0.52, 0.86]
+          - [0.07, 0.18, 0.45, 0.48]   # upper-left clean zone (preferred)
+          - [0.07, 0.32, 0.46, 0.62]   # mid-left
+          - [0.07, 0.46, 0.46, 0.76]   # lower-left
         avoid_busy_regions: true
         min_line_count: 2
-        max_line_count: 3
+        max_line_count: 4
 
       "16x9":
         # 16:9 is the campaign hero shape — candidate boxes are 0.30 high

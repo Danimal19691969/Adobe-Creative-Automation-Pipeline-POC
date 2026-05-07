@@ -310,6 +310,126 @@ def _try_shift_box_away_from_focal(
     return None, "no_safe_shift_available"
 
 
+def _widen_box_toward_focal_safe_zone(
+    box_pct: tuple[float, float, float, float],
+    focal_safe_zone_pct: tuple[float, float, float, float] | None,
+    min_gap_px: int,
+    canvas_w: int,
+    canvas_h: int,
+    max_widen_pct: float,
+    epsilon_px: float = 1.0,
+) -> tuple[tuple[float, float, float, float], str, float]:
+    """Extend ``box_pct`` toward the focal safe zone, up to a clearance
+    of ``min_gap_px``. Caps the absolute widen to
+    ``max_widen_pct * canvas_w``.
+
+    Returns ``(new_box, reason, width_delta_pct)``. When no widening is
+    safe or beneficial, returns the original box and a reason string.
+    Always-on but bounded by ``max_widen_pct=0`` (disabled).
+    """
+    if max_widen_pct <= 0.0:
+        return box_pct, "disabled", 0.0
+    if focal_safe_zone_pct is None:
+        return box_pct, "no_focal_safe_zone", 0.0
+
+    bx0, by0, bx1, by1 = box_pct
+    fx0, fy0, fx1, fy1 = focal_safe_zone_pct
+    # Direction: focal to the RIGHT of box → can widen x_max rightward.
+    # Direction: focal to the LEFT of box → can widen x_min leftward.
+    bx_center = (bx0 + bx1) / 2
+    fx_center = (fx0 + fx1) / 2
+
+    cap_pct = max_widen_pct  # in fractions of canvas width
+    epsilon_pct = epsilon_px / max(1, canvas_w)
+    gap_pct = min_gap_px / max(1, canvas_w)
+
+    if fx_center >= bx_center:
+        # Focal is on the right → push x_max right, but stop before
+        # entering the safe zone (minus the required gap).
+        max_safe_x = fx0 - gap_pct - epsilon_pct
+        if bx1 + epsilon_pct >= max_safe_x:
+            return box_pct, "already_wide_enough", 0.0
+        widen_to = min(max_safe_x, bx1 + cap_pct)
+        if widen_to <= bx1 + epsilon_pct:
+            return box_pct, "no_widen_room", 0.0
+        delta = widen_to - bx1
+        return (bx0, by0, widen_to, by1), (
+            f"widened x_max {bx1:.3f}→{widen_to:.3f} (+{delta:.3f}) "
+            f"toward focal at x={fx0:.3f}"
+        ), delta
+    else:
+        # Focal is on the left → push x_min leftward.
+        min_safe_x = fx1 + gap_pct + epsilon_pct
+        if bx0 - epsilon_pct <= min_safe_x:
+            return box_pct, "already_wide_enough", 0.0
+        widen_to = max(min_safe_x, bx0 - cap_pct)
+        if widen_to >= bx0 - epsilon_pct:
+            return box_pct, "no_widen_room", 0.0
+        delta = bx0 - widen_to
+        return (widen_to, by0, bx1, by1), (
+            f"widened x_min {bx0:.3f}→{widen_to:.3f} (-{delta:.3f}) "
+            f"toward focal at x={fx1:.3f}"
+        ), delta
+
+
+def _build_shift_candidates(
+    box_pct: tuple[float, float, float, float],
+    focal_safe_zone_pct: tuple[float, float, float, float],
+    canvas_w: int,
+    canvas_h: int,
+    min_gap_px: int,
+) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """Deterministic list of shift candidates (name, shifted_box). Direction
+    chosen from the focal area's centroid relative to the box centroid;
+    always includes narrowing the side facing the focal object as a
+    last-resort attempt that preserves the box origin."""
+    canvas_min = max(1, min(canvas_w, canvas_h))
+    step = max(min_gap_px / canvas_min, 0.025)
+    bx_c = (box_pct[0] + box_pct[2]) / 2
+    by_c = (box_pct[1] + box_pct[3]) / 2
+    fx_c = (focal_safe_zone_pct[0] + focal_safe_zone_pct[2]) / 2
+    fy_c = (focal_safe_zone_pct[1] + focal_safe_zone_pct[3]) / 2
+
+    raw: list[tuple[str, tuple[float, float, float, float] | None]] = []
+    if fx_c >= bx_c:
+        raw.append(("shift_left_1x", _shift_box_pct(box_pct, dx=-step)))
+        raw.append(("shift_left_2x", _shift_box_pct(box_pct, dx=-2 * step)))
+        raw.append(("narrow_right_1x", _shift_box_pct(box_pct, shrink_right=step)))
+        raw.append(("narrow_right_2x", _shift_box_pct(box_pct, shrink_right=2 * step)))
+    else:
+        raw.append(("shift_right_1x", _shift_box_pct(box_pct, dx=step)))
+        raw.append(("narrow_left_1x", _shift_box_pct(box_pct, shrink_left=step)))
+    if fy_c >= by_c:
+        raw.append(("shift_up_1x", _shift_box_pct(box_pct, dy=-step)))
+        raw.append(("shift_up_2x", _shift_box_pct(box_pct, dy=-2 * step)))
+    else:
+        raw.append(("shift_down_1x", _shift_box_pct(box_pct, dy=step)))
+        raw.append(("shift_down_2x", _shift_box_pct(box_pct, dy=2 * step)))
+    return [(name, sb) for name, sb in raw if sb is not None]
+
+
+def _shift_box_pct(
+    box_pct: tuple[float, float, float, float],
+    dx: float = 0.0,
+    dy: float = 0.0,
+    shrink_right: float = 0.0,
+    shrink_left: float = 0.0,
+) -> tuple[float, float, float, float] | None:
+    """Translate / shrink a unit-square box. Returns ``None`` when the
+    result would leave the unit square or invert."""
+    x0, y0, x1, y1 = box_pct
+    nx0 = x0 + dx + shrink_left
+    nx1 = x1 + dx - shrink_right
+    ny0 = y0 + dy
+    ny1 = y1 + dy
+    # Keep inside [0, 1] and a sensible minimum width.
+    if nx0 < 0.0 or ny0 < 0.0 or nx1 > 1.0 or ny1 > 1.0:
+        return None
+    if nx1 - nx0 < 0.16 or ny1 - ny0 < 0.10:
+        return None
+    return (nx0, ny0, nx1, ny1)
+
+
 def _box_overlap_pct(
     a_pct: tuple[float, float, float, float],
     b_pct: tuple[float, float, float, float],
@@ -324,6 +444,228 @@ def _box_overlap_pct(
     inter = (ix1 - ix0) * (iy1 - iy0)
     a_area = max(1e-9, (ax1 - ax0) * (ay1 - ay0))
     return float(inter / a_area)
+
+
+def _rendered_text_bbox_px(
+    box_px: tuple[int, int, int, int],
+    max_line_w: int,
+    total_text_h: int,
+    text_align: "TextAlign",
+) -> tuple[int, int, int, int]:
+    """Pixel bbox of the actual rendered text inside its candidate box —
+    accounts for line wrapping width (≤ box width) and alignment.
+
+    This is the bbox the composer uses for object-clearance checks,
+    contrast sampling, and prominence scoring (instead of the candidate
+    box, which can be wider than the text)."""
+    x0, y0, x1, _ = box_px
+    if text_align == TextAlign.LEFT:
+        rx0, rx1 = x0, x0 + max_line_w
+    elif text_align == TextAlign.RIGHT:
+        rx0, rx1 = x1 - max_line_w, x1
+    else:  # CENTER
+        mid = (x0 + x1) // 2
+        rx0 = mid - max_line_w // 2
+        rx1 = mid + max_line_w // 2
+    return (rx0, y0, rx1, y0 + total_text_h)
+
+
+def _bbox_to_pct(
+    box_px: tuple[int, int, int, int], canvas_w: int, canvas_h: int,
+) -> tuple[float, float, float, float]:
+    return (
+        box_px[0] / max(1, canvas_w),
+        box_px[1] / max(1, canvas_h),
+        box_px[2] / max(1, canvas_w),
+        box_px[3] / max(1, canvas_h),
+    )
+
+
+def _compute_composition_score(
+    crop_clearance_pass: bool,
+    crop_clip_detected: bool,
+    logo_clearance_pass: bool,
+    logo_collision: bool,
+    headline_prominence: float,
+    headline_clearance_pass: bool,
+    headline_too_small: bool,
+    accent_safe_zone_pass: bool,
+    disclaimer_clearance_pass: bool,
+    all_text_candidates_failed: bool,
+) -> dict:
+    """Final composition score aggregating crop / logo / headline /
+    accent / disclaimer health into one number in [0, 1] plus a
+    machine-readable warning list. The score weights:
+      - crop_clearance     0.18
+      - logo_clearance     0.15
+      - headline_prominence 0.27 (the existing prominence factor)
+      - headline_clearance 0.15
+      - accent_safe_zone   0.10
+      - disclaimer_clearance 0.15
+    """
+    crop_factor = 1.0 if crop_clearance_pass else (0.3 if crop_clip_detected else 0.7)
+    logo_factor = 1.0 if logo_clearance_pass else (0.3 if logo_collision else 0.6)
+    headline_clear_factor = 1.0 if headline_clearance_pass else 0.4
+    headline_size_factor = 0.5 if headline_too_small else 1.0
+    accent_factor = 1.0 if accent_safe_zone_pass else 0.7
+    disclaimer_factor = 1.0 if disclaimer_clearance_pass else 0.6
+
+    # Bound prominence into the same [0, 1] band as the other factors.
+    # Prominence already mixes its own weights — we just use it directly
+    # as the headline contribution and apply the size_factor as a
+    # multiplier so a "too small" floor caps the head room.
+    prominence = max(0.0, min(1.0, headline_prominence)) * headline_size_factor
+
+    score = (
+        0.18 * crop_factor
+        + 0.15 * logo_factor
+        + 0.27 * prominence
+        + 0.15 * headline_clear_factor
+        + 0.10 * accent_factor
+        + 0.15 * disclaimer_factor
+    )
+
+    warnings: list[str] = []
+    if crop_clip_detected:
+        warnings.append("focal_edge_clip")
+    elif not crop_clearance_pass:
+        warnings.append("focal_near_canvas_edge")
+    if logo_collision:
+        warnings.append("logo_product_collision")
+    elif not logo_clearance_pass:
+        warnings.append("logo_near_product_edge")
+    if headline_too_small:
+        warnings.append("headline_too_small")
+    if not headline_clearance_pass:
+        warnings.append("headline_near_object")
+    if not accent_safe_zone_pass:
+        warnings.append("accent_hugs_edge")
+    if not disclaimer_clearance_pass:
+        warnings.append("disclaimer_near_object")
+    if all_text_candidates_failed:
+        warnings.append("all_candidates_failed_clearance")
+
+    return {
+        "composition_score": round(score, 3),
+        "composition_warnings": warnings,
+        "composition_factors": {
+            "crop": round(crop_factor, 3),
+            "logo": round(logo_factor, 3),
+            "headline_prominence": round(prominence, 3),
+            "headline_clearance": round(headline_clear_factor, 3),
+            "headline_size": round(headline_size_factor, 3),
+            "accent": round(accent_factor, 3),
+            "disclaimer": round(disclaimer_factor, 3),
+        },
+    }
+
+
+def _compute_prominence_score(
+    font_size_px: int,
+    max_size_px: int,
+    min_size_px: int,
+    zone_fill_pct: float,
+    target_zone_fill_pct: float,
+    line_count: int,
+    preferred_lines: int | None,
+    min_lines: int | None,
+    max_lines: int | None,
+    fit_status: str,
+    contrast: float,
+    clearance_pass: bool,
+    collision: bool,
+    near_miss: bool,
+) -> dict:
+    """Weighted prominence score in [0, 1] indicating how confidently the
+    headline reads as campaign hero copy. Components are returned alongside
+    the aggregate so the report can show which factor dominates a low score.
+
+    Weights (sum 1.0):
+      - size_factor          0.30 — chosen size relative to ceiling
+      - zone_fill_factor     0.20 — vertical fill of the headline box
+      - line_factor          0.10 — preferred / in-bounds line count
+      - fit_factor           0.10 — type fits target without overflow
+      - contrast_factor      0.10 — local contrast ≥ AA
+      - clearance_factor     0.20 — distance from the focal/product object
+    """
+    max_size_px = max(1, max_size_px)
+    size_factor = min(1.0, font_size_px / max_size_px)
+
+    # Zone fill: 1.0 at the target, gracefully drops below; modest reward
+    # for exceeding (capped) so 0.85 fills don't beat 0.62-target = 1.0.
+    target = max(0.05, target_zone_fill_pct)
+    zone_fill_factor = min(1.0, zone_fill_pct / target)
+
+    if preferred_lines is not None and line_count == preferred_lines:
+        line_factor = 1.0
+    elif (
+        (min_lines is None or line_count >= min_lines)
+        and (max_lines is None or line_count <= max_lines)
+    ):
+        line_factor = 0.85
+    else:
+        line_factor = 0.5
+
+    fit_factor = {"fits": 1.0, "near_fit": 0.85, "overflow": 0.4}.get(fit_status, 0.6)
+
+    # AA = 4.5; AAA = 7.0+. 7+ saturates at 1.0; 4.5 = 0.64; 3.0 = 0.43.
+    contrast_factor = min(1.0, max(0.0, contrast / 7.0))
+
+    if collision:
+        clearance_factor = 0.2
+    elif near_miss:
+        clearance_factor = 0.55
+    else:
+        clearance_factor = 1.0 if clearance_pass else 0.7
+
+    score = (
+        0.30 * size_factor
+        + 0.20 * zone_fill_factor
+        + 0.10 * line_factor
+        + 0.10 * fit_factor
+        + 0.10 * contrast_factor
+        + 0.20 * clearance_factor
+    )
+    return {
+        "headline_prominence_score": round(score, 3),
+        "headline_size_factor": round(size_factor, 3),
+        "headline_zone_fill_factor": round(zone_fill_factor, 3),
+        "headline_line_factor": round(line_factor, 3),
+        "headline_fit_factor": round(fit_factor, 3),
+        "headline_contrast_factor": round(contrast_factor, 3),
+        "headline_clearance_factor": round(clearance_factor, 3),
+        "headline_zone_fill_pct": round(zone_fill_pct, 3),
+    }
+
+
+def _clearance_metrics(
+    rendered_bbox_pct: tuple[float, float, float, float],
+    focal_safe_zone_pct: tuple[float, float, float, float] | None,
+    canvas_w: int,
+    canvas_h: int,
+    min_gap_px: int,
+) -> dict:
+    """Return collision/near-miss/gap metrics for a rendered text bbox vs.
+    the unexpanded focal safe zone."""
+    if focal_safe_zone_pct is None:
+        return {
+            "gap_px": None,
+            "collision": False,
+            "near_miss": False,
+            "clearance_pass": True,
+            "overlap_pct": 0.0,
+        }
+    overlap = _box_overlap_pct(rendered_bbox_pct, focal_safe_zone_pct)
+    gap = _box_gap_px(rendered_bbox_pct, focal_safe_zone_pct, canvas_w, canvas_h)
+    collision = overlap > 0.0
+    near_miss = (not collision) and (min_gap_px > 0) and (gap < min_gap_px)
+    return {
+        "gap_px": round(gap, 1),
+        "collision": collision,
+        "near_miss": near_miss,
+        "clearance_pass": (not collision) and (not near_miss),
+        "overlap_pct": round(overlap, 4),
+    }
 
 
 def _region_texture_score(canvas: Image.Image, box: tuple[int, int, int, int]) -> float:
@@ -367,6 +709,7 @@ def _score_candidate_box(
     clearance_penalty: float = 0.0,
     min_gap_px: int = 0,
     hard_fail_collision: bool = False,
+    hard_fail_near_miss: bool = False,
     max_texture_norm: float = 1.0,
     max_edge_norm: float = 1.0,
 ) -> dict:
@@ -440,7 +783,9 @@ def _score_candidate_box(
     contrast_ok = best_contrast >= min_precheck
     busy_ok = texture_norm <= max_texture_norm
     edge_ok = edge_norm <= max_edge_norm
-    clearance_ok = not hard_collision if hard_fail_collision else True
+    collision_ok = (not hard_collision) if hard_fail_collision else True
+    near_miss_ok = (not near_miss) if hard_fail_near_miss else True
+    clearance_ok = collision_ok and near_miss_ok
     viable = contrast_ok and busy_ok and edge_ok and clearance_ok
     if not viable:
         score -= 1.0  # ranks any viable alternative above this one
@@ -455,6 +800,10 @@ def _score_candidate_box(
     if hard_collision and hard_fail_collision:
         rejection_reasons.append(
             f"hard_collision (overlap_pct={focal_overlap_pct:.3f} with focal safe zone)"
+        )
+    if near_miss and hard_fail_near_miss:
+        rejection_reasons.append(
+            f"near_miss (gap_px={text_object_gap_px:.1f} < {min_gap_px})"
         )
 
     return {
@@ -576,7 +925,9 @@ def _select_headline_box(
                     True if safe_zone_pct is None
                     else (focal_overlap == 0.0 and (gap_px is None or gap_px >= min_gap_px))
                 ),
+                "all_candidates_failed_clearance": False,
                 "focal_density": focal_density,
+                "min_gap_px_threshold": min_gap_px,
             },
         )
 
@@ -613,11 +964,22 @@ def _select_headline_box(
             clearance_penalty=layout.object_clearance_penalty,
             min_gap_px=min_gap_px,
             hard_fail_collision=layout.hard_fail_text_object_collision,
+            hard_fail_near_miss=layout.hard_fail_text_object_near_miss,
             max_texture_norm=layout.text_region_max_texture_score,
             max_edge_norm=layout.text_region_max_edge_density,
         )
         for box_pct in candidates
     ]
+    # Track whether *every* candidate failed clearance — surfaced in the
+    # report so the run is auditable when no viable zone existed.
+    all_clearance_failed = (
+        bool(scored)
+        and all(
+            (s["hard_collision"] and layout.hard_fail_text_object_collision)
+            or (s["near_miss"] and layout.hard_fail_text_object_near_miss)
+            for s in scored
+        )
+    )
     # Highest score wins; preserve original list order in the audit trail.
     winner = max(scored, key=lambda s: s["score"])
     runner_up_gap = None
@@ -700,7 +1062,9 @@ def _select_headline_box(
             "text_object_clearance_pass": (
                 winner["clearance_ok"] and not winner["near_miss"]
             ),
+            "all_candidates_failed_clearance": all_clearance_failed,
             "focal_density": focal_density,
+            "min_gap_px_threshold": min_gap_px,
         },
     )
 
@@ -875,6 +1239,61 @@ def _line_height(draw: ImageDraw.ImageDraw, font) -> int:
     return max(1, bbox[3] - bbox[1])
 
 
+def _wrap_text_balanced(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font,
+    max_width: int,
+    target_line_count: int,
+) -> list[str] | None:
+    """Split ``text`` into exactly ``target_line_count`` contiguous-word
+    groups minimizing ``max_line_width − min_line_width``. Returns
+    ``None`` when no split is achievable (any group's rendered width
+    exceeds ``max_width``).
+
+    Used by the fitter as an alternative to greedy wrap when greedy
+    produces single-word lines on narrow boxes. Enumerates all
+    ``C(n-1, k-1)`` cut positions; with k ≤ 4 and n ≤ ~15 this is
+    cheap (≤ a few hundred candidates per font size)."""
+    words = text.split()
+    n = len(words)
+    if target_line_count < 1 or target_line_count > n:
+        return None
+    if target_line_count == 1:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        if bbox[2] - bbox[0] > max_width:
+            return None
+        return [text]
+
+    def _measure(group: list[str]) -> int:
+        joined = " ".join(group)
+        bbox = draw.textbbox((0, 0), joined, font=font)
+        return bbox[2] - bbox[0]
+
+    # Enumerate every way to place (target_line_count - 1) cuts in the
+    # n-1 inter-word slots. Keep only splits whose every line fits.
+    from itertools import combinations
+    best_split: tuple[list[str], ...] | None = None
+    best_spread = float("inf")
+    for cuts in combinations(range(1, n), target_line_count - 1):
+        groups = []
+        prev = 0
+        for c in cuts:
+            groups.append(words[prev:c])
+            prev = c
+        groups.append(words[prev:])
+        widths = [_measure(g) for g in groups]
+        if max(widths) > max_width:
+            continue
+        spread = max(widths) - min(widths)
+        if spread < best_spread:
+            best_spread = spread
+            best_split = tuple(groups)
+    if best_split is None:
+        return None
+    return [" ".join(g) for g in best_split]
+
+
 def _fit_text_with_pixel_bounds(
     draw: ImageDraw.ImageDraw,
     text: str,
@@ -888,6 +1307,7 @@ def _fit_text_with_pixel_bounds(
     min_line_count: int | None = None,
     max_line_count: int | None = None,
     line_spacing: float = 1.18,
+    hero_scale_threshold_px: int = 80,
 ):
     """Find the largest font size in ``[min_size_px, max_size_px]`` whose
     wrapped text fits inside ``target_h`` and produces a line count between
@@ -905,15 +1325,51 @@ def _fit_text_with_pixel_bounds(
     if max_size_px < min_size_px:
         max_size_px = min_size_px
 
-    candidates: list[tuple[int, ImageFont.ImageFont, list[str], int]] = []
-    # Step by 2 px for a tight resolution without doing 90 wrapping passes.
+    # Each candidate is (size, font, lines, total_h, strategy).
+    # ``strategy`` is "greedy" by default; the loop also tries
+    # ``_wrap_text_balanced`` when greedy produces single-word lines on a
+    # multi-word headline, so balanced variants compete head-to-head with
+    # greedy at every size.
+    candidates: list[tuple[int, ImageFont.ImageFont, list[str], int, str]] = []
+    word_count = len(text.split())
+
+    def _has_single_word_line(lines_in: list[str]) -> bool:
+        return any(len(line.split()) == 1 for line in lines_in)
+
     for size in range(max_size_px, min_size_px - 1, -2):
         font = _load_font(fonts_dir, font_filename, size)
-        lines = _wrap_text(draw, text, font, box_w)
+        greedy_lines = _wrap_text(draw, text, font, box_w)
         lh = _line_height(draw, font)
-        total_h = int(lh * line_spacing) * len(lines)
-        if total_h <= target_h:
-            candidates.append((size, font, lines, total_h))
+        greedy_h = int(lh * line_spacing) * len(greedy_lines)
+        if greedy_h <= target_h:
+            candidates.append((size, font, greedy_lines, greedy_h, "greedy"))
+
+        # Balanced-wrap competition: only when greedy looks choppy
+        # (a single-word line on a >2-word headline) and we have a target
+        # line count to aim for.
+        if (
+            word_count > 2
+            and _has_single_word_line(greedy_lines)
+        ):
+            targets: list[int] = []
+            if preferred_line_count is not None:
+                targets.append(preferred_line_count)
+            if (
+                preferred_line_count is None
+                or len(greedy_lines) != preferred_line_count
+            ):
+                targets.append(len(greedy_lines))
+            seen_targets: set[int] = set()
+            for target_n in targets:
+                if target_n in seen_targets or target_n < 1 or target_n > word_count:
+                    continue
+                seen_targets.add(target_n)
+                balanced = _wrap_text_balanced(draw, text, font, box_w, target_n)
+                if balanced is None:
+                    continue
+                bal_h = int(lh * line_spacing) * len(balanced)
+                if bal_h <= target_h:
+                    candidates.append((size, font, balanced, bal_h, "balanced"))
 
     if not candidates:
         font = _load_font(fonts_dir, font_filename, min_size_px)
@@ -922,6 +1378,7 @@ def _fit_text_with_pixel_bounds(
         return (
             font, lines, int(lh * line_spacing) * len(lines),
             f"min_floor_overflow (no size in [{min_size_px}, {max_size_px}] fit target_h={target_h})",
+            "greedy",
         )
 
     def _within_bounds(n: int) -> bool:
@@ -931,29 +1388,73 @@ def _fit_text_with_pixel_bounds(
             return False
         return True
 
+    # Selection priority:
+    #   - matches preferred_line_count (tier 1)
+    #   - within [min_line_count, max_line_count] (tier 2)
+    #   - any fitting size (tier 3)
+    # Within each tier:
+    #   - prefer wraps WITHOUT single-word lines on multi-word headlines
+    #     (avoids the "Refresh / your / summer, / naturally." failure
+    #     mode); a 58 px clean 3-line wrap beats a 70 px 4-single-word wrap
+    #   - then largest font size
+    #   - then balanced strategy on a tie
+    has_choppy_threshold = word_count > 2
+    # When NO candidate has zero single-word lines (narrow box + long
+    # words), single-word lines aren't avoidable — the fitter switches
+    # to "hero-scale" mode where a font ≥ ``hero_scale_threshold_px`` is
+    # treated as intentional poster typography (better than caption-sized
+    # multi-word wraps). The non-choppy preference still wins whenever a
+    # zero-single-word-line wrap exists.
+    any_zero_choppy_candidate = any(
+        sum(1 for line in c[2] if len(line.split()) == 1) == 0
+        for c in candidates
+    )
+
+    def _rank(c: tuple[int, ImageFont.ImageFont, list[str], int, str]) -> tuple:
+        size, _font, lines, _h, strategy = c
+        single_word_lines = sum(1 for line in lines if len(line.split()) == 1)
+        if not has_choppy_threshold:
+            choppy_score = 0
+        elif any_zero_choppy_candidate:
+            # A non-choppy alternative exists somewhere — penalize
+            # single-word lines hard so the tidy wrap wins.
+            choppy_score = -single_word_lines
+        else:
+            # Single-word lines are unavoidable. Score by hero-scale
+            # adjacency: a 100-px 4-single-word stack reads as poster
+            # typography; a 56-px version reads as caption-sized.
+            # Sizes at or above the threshold tier above smaller ones.
+            choppy_score = 1 if size >= hero_scale_threshold_px else 0
+        # Higher tuple = better. Sort descending.
+        return (
+            choppy_score,
+            size,
+            0 if strategy == "greedy" else 1,
+        )
+
     # 1. Preferred line count, if achievable AND in bounds.
     if preferred_line_count is not None and _within_bounds(preferred_line_count):
         preferred = [c for c in candidates if len(c[2]) == preferred_line_count]
         if preferred:
-            size, font, lines, total_h = preferred[0]
+            size, font, lines, total_h, strategy = max(preferred, key=_rank)
             return font, lines, total_h, (
-                f"preferred_line_count={preferred_line_count} at largest fitting size ({size}px)"
-            )
+                f"preferred_line_count={preferred_line_count} at largest fitting size ({size}px, strategy={strategy})"
+            ), strategy
 
     # 2. Within line-count bounds.
     if min_line_count is not None or max_line_count is not None:
         bounded = [c for c in candidates if _within_bounds(len(c[2]))]
         if bounded:
-            size, font, lines, total_h = bounded[0]
+            size, font, lines, total_h, strategy = max(bounded, key=_rank)
             return font, lines, total_h, (
-                f"largest size honoring line bounds [{min_line_count}, {max_line_count}] ({size}px, {len(lines)} lines)"
-            )
+                f"largest size honoring line bounds [{min_line_count}, {max_line_count}] ({size}px, {len(lines)} lines, strategy={strategy})"
+            ), strategy
 
     # 3. Largest fitting size, line count whatever it is.
-    size, font, lines, total_h = candidates[0]
+    size, font, lines, total_h, strategy = max(candidates, key=_rank)
     return font, lines, total_h, (
-        f"largest fitting size ({size}px, {len(lines)} lines)"
-    )
+        f"largest fitting size ({size}px, {len(lines)} lines, strategy={strategy})"
+    ), strategy
 
 
 def _fit_text_to_box(
@@ -987,23 +1488,363 @@ def _fit_text_to_box(
 
 
 def smart_crop(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    """Backwards-compatible wrapper around the scoring-based crop. Older
+    tests use ``smart_crop(img, w, h)`` without layout context; that path
+    falls through to the legacy center-with-upward-bias behavior."""
+    cropped, _ = smart_crop_with_scoring(
+        img, target_w, target_h, layout=None, ratio=None, brand=None,
+    )
+    return cropped
+
+
+def _crop_focal_after_offset(
+    img: Image.Image, crop_box_px: tuple[int, int, int, int],
+    target_w: int, target_h: int,
+) -> tuple[tuple[float, float, float, float] | None, float]:
+    """Estimate focal area on the resized crop. Returns (focal_pct,
+    focal_density). Reuses the same coarse-grid heuristic the rest of the
+    composer relies on so crop-time and post-overlay-time agree."""
+    cropped = img.crop(crop_box_px).resize((target_w, target_h), Image.LANCZOS)
+    return _estimate_focal_area(cropped)
+
+
+def _focal_edge_clearance_metrics(
+    focal_pct: tuple[float, float, float, float] | None,
+    target_w: int,
+    target_h: int,
+    edge_pad_px: int,
+) -> dict:
+    """Return per-edge gap (px) from focal box to the canvas edges and a
+    pass/clip summary."""
+    if focal_pct is None:
+        return {
+            "focal_edge_gap_px": None,
+            "min_edge_gap_px": None,
+            "focal_edge_clearance_pass": True,
+            "focal_edge_clip_detected": False,
+            "edges_touched": [],
+        }
+    fx0, fy0, fx1, fy1 = focal_pct
+    left_px = fx0 * target_w
+    right_px = (1.0 - fx1) * target_w
+    top_px = fy0 * target_h
+    bottom_px = (1.0 - fy1) * target_h
+    edges = {
+        "left": left_px,
+        "right": right_px,
+        "top": top_px,
+        "bottom": bottom_px,
+    }
+    min_gap = min(edges.values())
+    edges_touched = [name for name, gap in edges.items() if gap < edge_pad_px]
+    clip = min_gap <= 0.0  # focal touches a canvas edge → clipped
+    return {
+        "focal_edge_gap_px": {k: round(v, 1) for k, v in edges.items()},
+        "min_edge_gap_px": round(min_gap, 1),
+        "focal_edge_clearance_pass": (min_gap >= edge_pad_px),
+        "focal_edge_clip_detected": clip,
+        "edges_touched": edges_touched,
+    }
+
+
+def smart_crop_with_scoring(
+    img: Image.Image,
+    target_w: int,
+    target_h: int,
+    layout: "LayoutTemplate | None",
+    ratio: str | None,
+    brand: "BrandGuidelines | None" = None,
+) -> tuple[Image.Image, dict]:
+    """Score a deterministic set of crop offsets and pick whichever crop
+    keeps the estimated focal/product cluster furthest from the canvas
+    edges. Falls back to legacy center-bias behavior when the source
+    already matches the target aspect or no layout is supplied.
+
+    Returns ``(cropped_canvas, crop_meta)``. ``crop_meta`` contains:
+      strategy_used, candidates, scores, edge_gap_px, clearance_pass, etc.
+    """
     src_w, src_h = img.size
     target_aspect = target_w / target_h
     src_aspect = src_w / src_h
+    base_meta = {
+        "crop_strategy_used": None,
+        "crop_box_used": None,
+        "crop_box_candidates": [],
+        "crop_box_scores": [],
+        "focal_edge_gap_px": None,
+        "min_edge_gap_px": None,
+        "focal_edge_clearance_pass": True,
+        "focal_edge_clip_detected": False,
+        "crop_edge_clip_penalty_applied": False,
+        "edges_touched": [],
+        "letterbox_applied": False,
+        "letterbox_pad_pct": None,
+        "letterbox_color_used": None,
+        "letterbox_color_source": None,
+    }
+
+    # Aspect already matches → no crop needed.
     if abs(src_aspect - target_aspect) < 0.01:
-        return img.resize((target_w, target_h), Image.LANCZOS)
+        canvas = img.resize((target_w, target_h), Image.LANCZOS)
+        focal_pct, _ = _estimate_focal_area(canvas)
+        edge_pad_px = _resolve_edge_pad_px(layout, ratio, target_w, target_h)
+        edge = _focal_edge_clearance_metrics(focal_pct, target_w, target_h, edge_pad_px)
+        return canvas, {**base_meta, "crop_strategy_used": "no_crop_aspect_match", **edge}
+
+    # Build deterministic crop candidates spanning the valid offset range.
+    candidates: list[tuple[str, tuple[int, int, int, int]]] = []
     if src_aspect > target_aspect:
+        # Source is wider than target → vary x offset (vertical band).
         new_w = int(src_h * target_aspect)
-        x0 = (src_w - new_w) // 2
-        cropped = img.crop((x0, 0, x0 + new_w, src_h))
+        max_x0 = src_w - new_w
+        for label, frac in (
+            ("center", 0.50), ("upper_left", 0.30), ("right", 0.70),
+            ("left", 0.15), ("far_right", 0.85),
+        ):
+            x0 = max(0, min(max_x0, int(max_x0 * frac)))
+            candidates.append((f"x_{label}_{frac:.2f}", (x0, 0, x0 + new_w, src_h)))
     else:
+        # Source is taller than target → vary y offset.
         new_h = int(src_w / target_aspect)
         max_y0 = src_h - new_h
-        # Bias upward so the product hero (typically upper third in our prompt)
-        # stays above the headline overlay band.
-        y0 = min(max_y0, max(0, int(max_y0 * 0.20)))
-        cropped = img.crop((0, y0, src_w, y0 + new_h))
-    return cropped.resize((target_w, target_h), Image.LANCZOS)
+        for label, frac in (
+            ("upper", 0.20), ("center", 0.50), ("upper_third", 0.10),
+            ("lower", 0.70), ("top", 0.05),
+        ):
+            y0 = max(0, min(max_y0, int(max_y0 * frac)))
+            candidates.append((f"y_{label}_{frac:.2f}", (0, y0, src_w, y0 + new_h)))
+
+    edge_pad_px = _resolve_edge_pad_px(layout, ratio, target_w, target_h)
+    hard_fail = bool(layout and layout.hard_fail_focal_edge_clip)
+    clip_penalty = (
+        layout.crop_edge_clip_penalty if layout is not None else 0.0
+    )
+
+    scored: list[dict] = []
+    for label, crop_box_px in candidates:
+        focal_pct, focal_density = _crop_focal_after_offset(
+            img, crop_box_px, target_w, target_h,
+        )
+        edge = _focal_edge_clearance_metrics(focal_pct, target_w, target_h, edge_pad_px)
+        # Score: clearance pass = +1.0, near-edge gradient otherwise.
+        # Penalize hard clip; reward whichever crop has the largest min-edge gap.
+        if focal_pct is None:
+            base_score = 0.5  # no detected focal — neutral
+        else:
+            min_gap = edge["min_edge_gap_px"]
+            base_score = min(1.0, max(0.0, min_gap / max(1, edge_pad_px * 2)))
+        if edge["focal_edge_clip_detected"]:
+            base_score -= clip_penalty
+        scored.append({
+            "label": label,
+            "crop_box_px": list(crop_box_px),
+            "focal_pct": list(focal_pct) if focal_pct else None,
+            "focal_density": focal_density,
+            "min_edge_gap_px": edge["min_edge_gap_px"],
+            "edges_touched": edge["edges_touched"],
+            "clearance_pass": edge["focal_edge_clearance_pass"],
+            "clip_detected": edge["focal_edge_clip_detected"],
+            "score": round(base_score, 4),
+        })
+
+    # Prefer the highest-scoring viable crop. When hard_fail is on and
+    # nothing is viable, the highest score still wins (least bad), but
+    # the meta records that the penalty was applied.
+    viable = [s for s in scored if (not hard_fail) or (not s["clip_detected"])]
+    pool = viable or scored
+    winner = max(pool, key=lambda s: s["score"])
+    crop_box_px = tuple(winner["crop_box_px"])
+    cropped = img.crop(crop_box_px).resize((target_w, target_h), Image.LANCZOS)
+
+    # Re-run edge metrics on the *winner* for the meta (the focal estimate
+    # is identical to what the scorer saw).
+    final_focal_pct = (
+        tuple(winner["focal_pct"]) if winner["focal_pct"] else None
+    )
+    final_edge = _focal_edge_clearance_metrics(
+        final_focal_pct, target_w, target_h, edge_pad_px,
+    )
+
+    # Letterbox fallback: when no crop offset clears the focal cluster
+    # from the canvas edges, fit the source onto a neutral-color canvas
+    # so the focal product gets visible breathing room. Only fires when
+    # the brand explicitly opts in and the required pad fits the cap.
+    letterbox_meta: dict = {
+        "letterbox_applied": False,
+        "letterbox_pad_pct": None,
+        "letterbox_color_used": None,
+        "letterbox_color_source": None,
+    }
+    needs_letterbox = (
+        layout is not None
+        and getattr(layout, "enable_focal_letterbox_when_clip_unavoidable", False)
+        and bool(scored)
+        and all(s["clip_detected"] for s in scored)
+    )
+    if needs_letterbox:
+        current_gap = winner["min_edge_gap_px"] or 0
+        # Pad needed to lift the focal off the canvas edge to the brand
+        # threshold, expressed as a fraction of min canvas dim.
+        gap_deficit_px = max(0, edge_pad_px - current_gap)
+        target_dim = min(target_w, target_h)
+        required_pad_pct = gap_deficit_px / max(1, target_dim)
+        max_pad = getattr(layout, "letterbox_max_pad_pct", 0.08)
+        if 0 < required_pad_pct <= max_pad:
+            # Pick the fill color per ``letterbox_color_role``.
+            color_role = getattr(layout, "letterbox_color_role", "auto")
+            color_used: str
+            color_source: str
+            if color_role == "brand_primary":
+                color_used = brand.visual_identity.primary_color if brand else "#FFFFFF"
+                color_source = "brand_explicit"
+            elif color_role == "brand_secondary":
+                color_used = brand.visual_identity.secondary_color if brand else "#FFFFFF"
+                color_source = "brand_explicit"
+            elif color_role == "brand_accent":
+                color_used = brand.visual_identity.accent_color if brand else "#FFFFFF"
+                color_source = "brand_explicit"
+            elif color_role == "sampled_edge":
+                color_used = "#{:02X}{:02X}{:02X}".format(*_sample_edge_median_color(img))
+                color_source = "sampled"
+            else:  # auto
+                sampled_rgb = _sample_edge_median_color(img)
+                if brand is not None:
+                    palette = [
+                        brand.visual_identity.primary_color,
+                        brand.visual_identity.secondary_color,
+                        brand.visual_identity.accent_color,
+                    ]
+                    snapped, dist = _snap_color_to_brand(sampled_rgb, palette)
+                else:
+                    snapped, dist = None, float("inf")
+                if snapped is not None:
+                    color_used = snapped
+                    color_source = "brand_snap"
+                else:
+                    color_used = "#{:02X}{:02X}{:02X}".format(*sampled_rgb)
+                    color_source = "sampled"
+
+            letterbox_canvas, lb_meta = _letterbox_fit_fallback(
+                img, target_w, target_h,
+                fill_rgb=_hex_to_rgb(color_used),
+                pad_pct=required_pad_pct,
+            )
+            cropped = letterbox_canvas.convert("RGBA")
+            # Re-estimate focal on the letterboxed canvas — its edges should
+            # now clear the brand threshold by construction.
+            final_focal_pct, _ = _estimate_focal_area(cropped)
+            final_edge = _focal_edge_clearance_metrics(
+                final_focal_pct, target_w, target_h, edge_pad_px,
+            )
+            letterbox_meta = {
+                "letterbox_applied": True,
+                "letterbox_pad_pct": lb_meta["pad_pct"],
+                "letterbox_color_used": color_used,
+                "letterbox_color_source": color_source,
+            }
+
+    return cropped, {
+        "crop_strategy_used": (
+            f"scored_{len(scored)}_candidates: winner={winner['label']} "
+            f"score={winner['score']}"
+            + (" → letterbox_fallback" if letterbox_meta["letterbox_applied"] else "")
+        ),
+        "crop_box_used": list(crop_box_px),
+        "crop_box_candidates": [
+            {"label": s["label"], "crop_box_px": s["crop_box_px"]} for s in scored
+        ],
+        "crop_box_scores": scored,
+        **final_edge,
+        "crop_edge_clip_penalty_applied": (
+            winner["clip_detected"]
+            and clip_penalty > 0.0
+            and not letterbox_meta["letterbox_applied"]
+        ),
+        **letterbox_meta,
+    }
+
+
+def _sample_edge_median_color(img: Image.Image, edge_pct: float = 0.04) -> tuple[int, int, int]:
+    """Median RGB of the source's outer-ring pixels. Used by the letterbox
+    fallback to pick a fill color that visually extends the source rather
+    than dropping a cliff at the border."""
+    import numpy as np
+    rgb = img.convert("RGB")
+    W, H = rgb.size
+    edge = max(1, int(min(W, H) * edge_pct))
+    pieces = [
+        np.asarray(rgb.crop((0, 0, W, edge))).reshape(-1, 3),
+        np.asarray(rgb.crop((0, H - edge, W, H))).reshape(-1, 3),
+        np.asarray(rgb.crop((0, 0, edge, H))).reshape(-1, 3),
+        np.asarray(rgb.crop((W - edge, 0, W, H))).reshape(-1, 3),
+    ]
+    pixels = np.concatenate(pieces)
+    median = np.median(pixels, axis=0).astype(int)
+    return (int(median[0]), int(median[1]), int(median[2]))
+
+
+def _snap_color_to_brand(
+    rgb: tuple[int, int, int],
+    brand_colors_hex: list[str],
+    threshold: float = 60.0,
+) -> tuple[str | None, float]:
+    """Snap an arbitrary RGB to the nearest brand hex if within an RGB
+    Euclidean distance of ``threshold``. Returns ``(hex_or_None, distance)``."""
+    best_hex: str | None = None
+    best_dist: float = float("inf")
+    for hex_color in brand_colors_hex:
+        br, bg, bb = _hex_to_rgb(hex_color)
+        d = ((rgb[0] - br) ** 2 + (rgb[1] - bg) ** 2 + (rgb[2] - bb) ** 2) ** 0.5
+        if d < best_dist:
+            best_dist = d
+            best_hex = hex_color
+    if best_hex is not None and best_dist <= threshold:
+        return best_hex, best_dist
+    return None, best_dist
+
+
+def _letterbox_fit_fallback(
+    img: Image.Image,
+    target_w: int,
+    target_h: int,
+    fill_rgb: tuple[int, int, int],
+    pad_pct: float,
+) -> tuple[Image.Image, dict]:
+    """Downscale the entire source by ``2 * pad_pct`` and paste centered on
+    a solid-color canvas. Used when no crop offset clears the focal cluster
+    from the canvas edges."""
+    pad_w = int(target_w * pad_pct)
+    pad_h = int(target_h * pad_pct)
+    inner_w = max(1, target_w - 2 * pad_w)
+    inner_h = max(1, target_h - 2 * pad_h)
+    src_w, src_h = img.size
+    scale = min(inner_w / src_w, inner_h / src_h)
+    new_w = max(1, int(src_w * scale))
+    new_h = max(1, int(src_h * scale))
+    fitted = img.convert("RGBA").resize((new_w, new_h), Image.LANCZOS)
+    canvas = Image.new("RGBA", (target_w, target_h), fill_rgb + (255,))
+    paste_x = (target_w - new_w) // 2
+    paste_y = (target_h - new_h) // 2
+    canvas.alpha_composite(fitted, dest=(paste_x, paste_y))
+    return canvas, {
+        "pad_pct": round(pad_pct, 4),
+        "pad_px": [pad_w, pad_h],
+        "inner_size_px": [new_w, new_h],
+        "paste_at_px": [paste_x, paste_y],
+    }
+
+
+def _resolve_edge_pad_px(
+    layout: "LayoutTemplate | None", ratio: str | None,
+    target_w: int, target_h: int,
+) -> int:
+    """Compute the focal-edge breathing-room threshold from the layout.
+    Falls back to a sensible default (4% of min dim) when no layout."""
+    if layout is None:
+        return int(0.04 * min(target_w, target_h))
+    px_min = layout.min_focal_edge_gap_px.get(ratio or "", 0) if ratio else 0
+    pct_min = int(layout.focal_edge_clearance_pct * min(target_w, target_h))
+    return max(px_min, pct_min)
 
 
 # ----- overlay rendering ----------------------------------------------------
@@ -1067,6 +1908,28 @@ def _render_overlay(canvas: Image.Image, layout: LayoutTemplate) -> Image.Image:
 # ----- accent ----------------------------------------------------------------
 
 
+def _resolve_accent_safe_x(
+    canvas_w: int, canvas_h: int, layout: LayoutTemplate, ratio: str,
+    desired_x: int, thickness: int,
+) -> tuple[int, int]:
+    """Return ``(rail_x_left, rail_x_right)`` for a vertical accent rail
+    with the brand-configured left safe margin enforced. The rail's
+    left edge cannot sit closer to the canvas than
+    ``max(min_accent_edge_gap_px, accent_safe_zone_pct * min(W, H))``.
+    Caller still gets to pick the headline-relative anchor; this just
+    pushes the rail away from the frame when it would otherwise hug it.
+    """
+    px_floor = layout.min_accent_edge_gap_px.get(ratio, 0)
+    pct_floor = int(layout.accent_safe_zone_pct * min(canvas_w, canvas_h))
+    safe_left = max(px_floor, pct_floor)
+    rail_x_right = max(desired_x, safe_left + thickness)
+    rail_x_left = max(safe_left, rail_x_right - thickness)
+    # Guarantee a 1 px rail width even after clamping.
+    if rail_x_right <= rail_x_left:
+        rail_x_right = rail_x_left + thickness
+    return (rail_x_left, rail_x_right)
+
+
 def _render_accent(
     canvas: Image.Image,
     layout: LayoutTemplate,
@@ -1074,9 +1937,18 @@ def _render_accent(
     text_box_px: tuple[int, int, int, int],
     headline_top_px: int,
     headline_bottom_px: int,
-) -> Image.Image:
+    ratio: str | None = None,
+) -> tuple[Image.Image, dict]:
+    """Render the layout's accent treatment. Returns the canvas + a meta
+    dict (accent_line_box, accent_edge_gap_px, accent_safe_zone_pass) so
+    the caller can audit the rail's left-margin compliance."""
+    accent_meta = {
+        "accent_line_box": None,
+        "accent_edge_gap_px": None,
+        "accent_safe_zone_pass": True,
+    }
     if layout.accent_style == AccentStyle.NONE:
-        return canvas
+        return canvas, accent_meta
 
     W, H = canvas.size
     color_hex = _resolve_role_color(layout.accent_color_role, brand)
@@ -1088,12 +1960,24 @@ def _render_accent(
     x0, y0, x1, y1 = text_box_px
 
     if layout.accent_style == AccentStyle.SIDE_RAIL:
-        # Vertical rail flush with the left of the headline box, spanning the
-        # vertical extent of the rendered headline.
+        # Vertical rail flush with the left of the headline box, but
+        # never inside the brand's left safe margin.
+        desired_right = x0 - thickness
+        rail_x_left, rail_x_right = _resolve_accent_safe_x(
+            W, H, layout, ratio or "", desired_right, thickness,
+        )
         draw.rectangle(
-            (x0 - thickness * 2, headline_top_px, x0 - thickness, headline_bottom_px),
+            (rail_x_left, headline_top_px, rail_x_right, headline_bottom_px),
             fill=color_rgba,
         )
+        edge_gap = rail_x_left
+        px_floor = layout.min_accent_edge_gap_px.get(ratio or "", 0)
+        pct_floor = int(layout.accent_safe_zone_pct * min(W, H))
+        accent_meta = {
+            "accent_line_box": [rail_x_left, headline_top_px, rail_x_right, headline_bottom_px],
+            "accent_edge_gap_px": edge_gap,
+            "accent_safe_zone_pass": edge_gap >= max(px_floor, pct_floor),
+        }
     elif layout.accent_style == AccentStyle.UNDERLINE:
         underline_w = min(int((x1 - x0) * 0.35), int(W * 0.18))
         y = headline_bottom_px + int(thickness * 1.2)
@@ -1117,7 +2001,7 @@ def _render_accent(
         glow = glow.filter(ImageFilter.GaussianBlur(radius=int(min(W, H) * 0.04)))
         overlay = Image.alpha_composite(overlay, glow)
 
-    return Image.alpha_composite(canvas, overlay)
+    return Image.alpha_composite(canvas, overlay), accent_meta
 
 
 # ----- logo (with optional badge) -------------------------------------------
@@ -1179,9 +2063,136 @@ def _logo_position(W: int, H: int, w: int, h: int, placement: LogoPlacement, saf
     return (W - w - safe_x, H - h - safe_y)
 
 
+def _compute_logo_footprint(
+    canvas_w: int, canvas_h: int, brand: "BrandGuidelines",
+) -> tuple[int, int]:
+    """Return the on-canvas (width, height) of the rendered logo (badge
+    or plain). Mirrors the size logic in ``stamp_logo`` so position
+    selection can run *before* the actual paste."""
+    vi = brand.visual_identity
+    if not os.path.exists(vi.logo_path):
+        return (0, 0)
+    logo_source = Image.open(vi.logo_path).convert("RGBA")
+    target_h = int(min(canvas_w, canvas_h) * (vi.logo_height_pct or _FALLBACKS["logo_height_pct"]))
+    aspect = logo_source.size[0] / max(1, logo_source.size[1])
+    target_w = max(1, int(target_h * aspect))
+    if vi.logo_treatment == LogoTreatment.BADGE:
+        pad = int(target_h * 0.18)
+        return (target_w + pad * 2, target_h + pad * 2)
+    return (target_w, target_h)
+
+
+def _logo_bbox_at_placement(
+    W: int, H: int, w: int, h: int,
+    placement: LogoPlacement, safe_x: int, safe_y: int,
+) -> tuple[int, int, int, int]:
+    """Pixel bbox the logo would occupy at ``placement`` (top-left,
+    top-right, bottom-left, bottom-right)."""
+    pos = _logo_position(W, H, w, h, placement, safe_x, safe_y)
+    return (pos[0], pos[1], pos[0] + w, pos[1] + h)
+
+
+def select_logo_position(
+    canvas_w: int,
+    canvas_h: int,
+    logo_w: int,
+    logo_h: int,
+    brand: "BrandGuidelines",
+    ratio: str,
+    focal_safe_zone_pct: tuple[float, float, float, float] | None,
+) -> dict:
+    """Pick the logo placement that keeps clear breathing room from the
+    focal/product safe zone.
+
+    Order:
+      1. configured ``logo_placement`` (always tried first)
+      2. each entry in ``logo_allowed_positions`` (in YAML order)
+    First placement whose logo bbox achieves the required gap to the
+    focal safe zone wins. When none clear the bar, returns the configured
+    placement with ``selection_reason`` flagging the warning.
+    """
+    vi = brand.visual_identity
+    safe_x = int(canvas_w * vi.safe_zone_pct)
+    safe_y = int(canvas_h * vi.safe_zone_pct)
+    placements: list[LogoPlacement] = [vi.logo_placement]
+    for p in vi.logo_allowed_positions:
+        if p not in placements:
+            placements.append(p)
+
+    min_gap_px = vi.min_logo_product_gap_px.get(ratio, 0)
+    min_pct_gap_px = int(vi.logo_product_clearance_pct * min(canvas_w, canvas_h))
+    required_gap = max(min_gap_px, min_pct_gap_px)
+    hard_fail = vi.hard_fail_logo_product_collision
+
+    attempts: list[dict] = []
+    accepted: dict | None = None
+    for placement in placements:
+        bbox_px = _logo_bbox_at_placement(
+            canvas_w, canvas_h, logo_w, logo_h, placement, safe_x, safe_y,
+        )
+        bbox_pct = (
+            bbox_px[0] / max(1, canvas_w),
+            bbox_px[1] / max(1, canvas_h),
+            bbox_px[2] / max(1, canvas_w),
+            bbox_px[3] / max(1, canvas_h),
+        )
+        if focal_safe_zone_pct is not None:
+            overlap = _box_overlap_pct(bbox_pct, focal_safe_zone_pct)
+            gap = _box_gap_px(bbox_pct, focal_safe_zone_pct, canvas_w, canvas_h)
+        else:
+            overlap, gap = 0.0, float("inf")
+        collision = overlap > 0.0
+        near_miss = (not collision) and (gap < required_gap)
+        clearance_pass = (not collision) and (not near_miss)
+        attempt = {
+            "placement": placement.value,
+            "bbox_px": list(bbox_px),
+            "gap_px": (
+                None if gap == float("inf") else round(gap, 1)
+            ),
+            "collision": collision,
+            "near_miss": near_miss,
+            "clearance_pass": clearance_pass,
+        }
+        attempts.append(attempt)
+        if clearance_pass and accepted is None:
+            accepted = attempt
+        if accepted is not None and (not hard_fail or accepted["clearance_pass"]):
+            break
+
+    if accepted is None:
+        # No placement cleared — fall back to configured (least-bad).
+        accepted = attempts[0]
+        selection_reason = (
+            f"no allowed placement cleared {required_gap}px gap "
+            f"(configured={vi.logo_placement.value}); using configured anyway"
+        )
+    else:
+        selection_reason = (
+            f"first viable placement: {accepted['placement']} "
+            f"(gap_px={accepted['gap_px']}, required={required_gap})"
+        )
+
+    return {
+        "placement": LogoPlacement(accepted["placement"]),
+        "bbox_px": tuple(accepted["bbox_px"]),
+        "configured_placement": vi.logo_placement.value,
+        "logo_position_selected": accepted["placement"],
+        "logo_position_configured": vi.logo_placement.value,
+        "logo_position_adjusted": accepted["placement"] != vi.logo_placement.value,
+        "logo_product_gap_px": accepted["gap_px"],
+        "logo_product_clearance_pass": accepted["clearance_pass"],
+        "logo_collision_detected": accepted["collision"],
+        "logo_selection_reason": selection_reason,
+        "logo_position_attempts": attempts,
+        "logo_min_required_gap_px": required_gap,
+    }
+
+
 def stamp_logo(
     img: Image.Image,
     brand: BrandGuidelines,
+    placement_override: LogoPlacement | None = None,
 ) -> tuple[Image.Image, dict]:
     vi = brand.visual_identity
     if not os.path.exists(vi.logo_path):
@@ -1198,6 +2209,7 @@ def stamp_logo(
 
     safe_x = int(W * vi.safe_zone_pct)
     safe_y = int(H * vi.safe_zone_pct)
+    placement = placement_override if placement_override is not None else vi.logo_placement
 
     if vi.logo_treatment == LogoTreatment.BADGE:
         pad = int(target_h * 0.18)
@@ -1213,13 +2225,13 @@ def stamp_logo(
             badge_color_rgba=badge_color_rgba,
         )
         badge_w, badge_h = badge.size
-        pos = _logo_position(W, H, badge_w, badge_h, vi.logo_placement, safe_x, safe_y)
+        pos = _logo_position(W, H, badge_w, badge_h, placement, safe_x, safe_y)
         canvas.alpha_composite(badge, dest=pos)
         logo_w, logo_h = badge_w, badge_h
     else:
         # Plain treatment: single LANCZOS resize of the source logo.
         logo = logo_source.resize((target_w, target_h), Image.LANCZOS)
-        pos = _logo_position(W, H, target_w, target_h, vi.logo_placement, safe_x, safe_y)
+        pos = _logo_position(W, H, target_w, target_h, placement, safe_x, safe_y)
         canvas.alpha_composite(logo, dest=pos)
         logo_w, logo_h = target_w, target_h
 
@@ -1227,6 +2239,7 @@ def stamp_logo(
         "position": list(pos),
         "size_px": [logo_w, logo_h],
         "treatment": vi.logo_treatment.value,
+        "placement": placement.value,
     }
 
 
@@ -1324,6 +2337,113 @@ def _align_x(box_left: int, box_right: int, line_w: int, align: TextAlign) -> in
     return box_left + (box_right - box_left - line_w) // 2
 
 
+def select_disclaimer_box(
+    canvas: Image.Image,
+    layout: "LayoutTemplate",
+    ratio: str,
+    focal_safe_zone_pct: tuple[float, float, float, float] | None,
+    text_color_options: list[str],
+    fallback_box_px: tuple[int, int, int, int],
+) -> dict:
+    """Pick the disclaimer placement that best preserves contrast +
+    clearance from the focal/product safe zone. Iterates
+    ``layout.disclaimer_candidate_boxes[ratio]`` (in YAML order) and
+    scores each candidate. First candidate is the configured preference;
+    subsequent ones are alternates the composer falls back to when the
+    preferred zone is crowded.
+
+    Returns dict with the chosen box plus full audit. When the layout
+    doesn't supply candidates, falls through to ``fallback_box_px`` so
+    legacy templates keep working.
+    """
+    W, H = canvas.size
+    candidates_pct = layout.disclaimer_candidate_boxes.get(ratio, [])
+    if not candidates_pct:
+        return {
+            "box_px": fallback_box_px,
+            "candidate_pct": None,
+            "candidate_index": None,
+            "candidate_attempts": [],
+            "selection_reason": "no_candidates_configured: using fallback placement",
+            "clearance_pass": True,
+            "object_gap_px": None,
+            "contrast_estimate": None,
+        }
+
+    px_floor = layout.min_disclaimer_object_gap_px.get(ratio, 0)
+    pct_floor = int(0.025 * min(W, H))
+    required_gap = max(px_floor, pct_floor)
+
+    attempts: list[dict] = []
+    accepted: dict | None = None
+    for idx, box_pct in enumerate(candidates_pct):
+        bx0, by0, bx1, by1 = box_pct
+        box_px = (
+            int(bx0 * W), int(by0 * H), int(bx1 * W), int(by1 * H),
+        )
+        if focal_safe_zone_pct is not None:
+            overlap = _box_overlap_pct(box_pct, focal_safe_zone_pct)
+            gap = _box_gap_px(box_pct, focal_safe_zone_pct, W, H)
+        else:
+            overlap, gap = 0.0, float("inf")
+        clearance_pass = (overlap == 0.0) and (gap >= required_gap)
+
+        bg_rgb = _box_mean_rgb_ext(canvas, box_px)
+        contrasts = sorted(
+            ((c, _contrast.contrast_ratio(_contrast.hex_to_rgb(c), bg_rgb))
+             for c in text_color_options),
+            key=lambda x: x[1], reverse=True,
+        )
+        best_color, best_contrast = contrasts[0]
+
+        attempt = {
+            "candidate_index": idx,
+            "box_pct": [round(c, 4) for c in box_pct],
+            "box_px": list(box_px),
+            "object_gap_px": (
+                None if gap == float("inf") else round(gap, 1)
+            ),
+            "overlap": round(overlap, 4),
+            "clearance_pass": clearance_pass,
+            "contrast_estimate": round(best_contrast, 2),
+            "best_text_color": best_color,
+        }
+        attempts.append(attempt)
+        if clearance_pass and accepted is None:
+            accepted = attempt
+            break
+
+    if accepted is None:
+        # No candidate cleared. Pick whichever has the largest gap (least
+        # crowded) so we report the least-bad choice.
+        accepted = max(
+            attempts,
+            key=lambda a: (a["clearance_pass"], a["object_gap_px"] or 0),
+        )
+        selection_reason = (
+            f"no candidate cleared {required_gap}px gap; "
+            f"using least-crowded #{accepted['candidate_index']} "
+            f"(gap={accepted['object_gap_px']})"
+        )
+    else:
+        selection_reason = (
+            f"candidate #{accepted['candidate_index']} "
+            f"(gap={accepted['object_gap_px']}, contrast≈{accepted['contrast_estimate']})"
+        )
+
+    return {
+        "box_px": tuple(accepted["box_px"]),
+        "candidate_pct": accepted["box_pct"],
+        "candidate_index": accepted["candidate_index"],
+        "candidate_attempts": attempts,
+        "selection_reason": selection_reason,
+        "clearance_pass": accepted["clearance_pass"],
+        "object_gap_px": accepted["object_gap_px"],
+        "contrast_estimate": accepted["contrast_estimate"],
+        "min_required_gap_px": required_gap,
+    }
+
+
 def _disclaimer_box(
     canvas_w: int,
     canvas_h: int,
@@ -1380,7 +2500,9 @@ def compose_creative(
 
     started = time.monotonic()
     hero = Image.open(hero_path).convert("RGBA")
-    cropped = smart_crop(hero, target_w, target_h)
+    cropped, crop_meta = smart_crop_with_scoring(
+        hero, target_w, target_h, layout=layout, ratio=ratio, brand=guidelines,
+    )
 
     # Resolve per-aspect layout, then pick the cleanest available headline
     # zone. When the brand has configured ``headline_candidate_boxes`` and
@@ -1396,6 +2518,26 @@ def compose_creative(
     ) = _select_headline_box(
         cropped, layout, per_aspect, guidelines, target_w, target_h,
     )
+
+    # Adaptive box widening: when the chosen candidate's edge is more
+    # conservative than necessary (focal product is far from it), let the
+    # box extend up to the safe-zone clearance limit. This is the lever
+    # that turns a 410-px-wide candidate into a ~600-px box on photos
+    # where the product is in the right third — the headline can then
+    # fit at hero scale instead of wrapping to single-word lines.
+    pre_widen_box_pct = selected_box_pct
+    safe_zone_for_widen = focal_meta.get("product_safe_zone_box")
+    if safe_zone_for_widen is not None:
+        safe_zone_for_widen = tuple(safe_zone_for_widen)
+    widen_min_gap_px = focal_meta.get("min_gap_px_threshold") or 0
+    widen_box, widen_reason, widen_delta_pct = _widen_box_toward_focal_safe_zone(
+        selected_box_pct, safe_zone_for_widen, widen_min_gap_px,
+        target_w, target_h, max_widen_pct=layout.headline_widen_max_pct,
+    )
+    headline_box_widened = widen_box != pre_widen_box_pct
+    if headline_box_widened:
+        selected_box_pct = widen_box
+
     bx0, by0, bx1, by1 = selected_box_pct
     hb = (int(bx0 * target_w), int(by0 * target_h), int(bx1 * target_w), int(by1 * target_h))
     box_w = hb[2] - hb[0]
@@ -1445,28 +2587,172 @@ def compose_creative(
     # Pre-measure the headline so we know the actual rendered text region.
     # No draw side-effects on the dummy canvas — we just need text metrics.
     _dummy = Image.new("RGB", (target_w, target_h))
-    headline_font, headline_lines, headline_total_h, headline_scale_reason = _fit_text_with_pixel_bounds(
-        ImageDraw.Draw(_dummy), cased_headline,
-        guidelines.typography.headline_font, fonts_dir,
-        min_size_px=headline_min_px,
-        max_size_px=headline_max_px,
-        box_w=box_w,
-        target_h=headline_target_h,
-        preferred_line_count=preferred_lines,
-        min_line_count=per_aspect.min_line_count,
-        max_line_count=per_aspect.max_line_count,
-        line_spacing=1.16,
+    _dummy_draw = ImageDraw.Draw(_dummy)
+
+    def _fit_in_box(box_pct_in: tuple[float, float, float, float]) -> dict:
+        """Fit the headline inside ``box_pct_in`` using the brand's per-aspect
+        bounds. Returns dict with font/lines/total_h/scale_reason and the
+        rendered text bbox (post-wrap, post-alignment, in pixel coords)."""
+        bx0_, by0_, bx1_, by1_ = box_pct_in
+        box_px_ = (
+            int(bx0_ * target_w), int(by0_ * target_h),
+            int(bx1_ * target_w), int(by1_ * target_h),
+        )
+        bw_ = max(1, box_px_[2] - box_px_[0])
+        f_, lines_, total_h_, sr_, ws_ = _fit_text_with_pixel_bounds(
+            _dummy_draw, cased_headline,
+            guidelines.typography.headline_font, fonts_dir,
+            min_size_px=headline_min_px,
+            max_size_px=headline_max_px,
+            box_w=bw_,
+            target_h=headline_target_h,
+            preferred_line_count=preferred_lines,
+            min_line_count=per_aspect.min_line_count,
+            max_line_count=per_aspect.max_line_count,
+            line_spacing=1.16,
+            hero_scale_threshold_px=layout.headline_hero_scale_threshold_px,
+        )
+        max_lw_ = _max_line_width(_dummy_draw, lines_, f_)
+        rb_px_ = _rendered_text_bbox_px(box_px_, max_lw_, total_h_, per_aspect.text_align)
+        if total_h_ <= headline_target_h:
+            fit_ = "fits"
+        elif total_h_ <= headline_target_h + 4:
+            fit_ = "near_fit"
+        else:
+            fit_ = "overflow"
+        return {
+            "box_pct": box_pct_in,
+            "box_px": box_px_,
+            "font": f_,
+            "lines": lines_,
+            "total_h": total_h_,
+            "max_line_w": max_lw_,
+            "rendered_bbox_px": rb_px_,
+            "rendered_bbox_pct": _bbox_to_pct(rb_px_, target_w, target_h),
+            "scale_reason": sr_,
+            "fit_status": fit_,
+            "wrap_strategy": ws_,
+        }
+
+    initial_fit = _fit_in_box(selected_box_pct)
+    headline_box_original_pct = list(selected_box_pct)
+
+    # Object-clearance check on the *rendered* text bbox (not the candidate
+    # box). The candidate scoring already rejected obvious collisions, but
+    # the rendered text may still crowd the focal area — especially when the
+    # text wraps wider than expected.
+    safe_zone_pct = focal_meta.get("product_safe_zone_box")
+    if safe_zone_pct is not None:
+        safe_zone_pct = tuple(safe_zone_pct)
+    min_gap_px = focal_meta.get("min_gap_px_threshold") or 0
+    initial_clearance = _clearance_metrics(
+        initial_fit["rendered_bbox_pct"], safe_zone_pct,
+        target_w, target_h, min_gap_px,
     )
-    # "fits" when the rendered text height respects the brand's target zone
-    # fill cap; "near_fit" when it overflows by under 4 px (rounding); else
-    # "overflow" — the brand's min-font-size floor was binding.
-    if headline_total_h <= headline_target_h:
-        headline_fit_status = "fits"
-    elif headline_total_h <= headline_target_h + 4:
-        headline_fit_status = "near_fit"
-    else:
-        headline_fit_status = "overflow"
-    text_render_box = (hb[0], hb[1], hb[2], hb[1] + headline_total_h)
+
+    # Multi-attempt shift cascade. If the rendered bbox collides with or
+    # near-misses the focal safe zone, try a deterministic series of
+    # shifts (left/right, up/down, narrow toward the focal side). Accept
+    # the first shift whose rendered bbox achieves clearance pass without
+    # making the headline overflow its target.
+    shift_attempts: list[dict] = []
+    final_fit = initial_fit
+    final_clearance = initial_clearance
+    final_box_pct = selected_box_pct
+    shift_success = bool(initial_clearance["clearance_pass"])
+    shift_chosen_name: str | None = None
+
+    needs_shift = (
+        safe_zone_pct is not None
+        and (initial_clearance["collision"] or initial_clearance["near_miss"])
+    )
+    if needs_shift:
+        candidates_for_shift = _build_shift_candidates(
+            selected_box_pct, safe_zone_pct, target_w, target_h, min_gap_px,
+        )
+        for name, candidate_box in candidates_for_shift:
+            attempt_fit = _fit_in_box(candidate_box)
+            attempt_clearance = _clearance_metrics(
+                attempt_fit["rendered_bbox_pct"], safe_zone_pct,
+                target_w, target_h, min_gap_px,
+            )
+            attempt_record = {
+                "shift_name": name,
+                "box_pct": [round(c, 4) for c in candidate_box],
+                "rendered_bbox_px": list(attempt_fit["rendered_bbox_px"]),
+                "gap_px": attempt_clearance["gap_px"],
+                "clearance_pass": attempt_clearance["clearance_pass"],
+                "fit_status": attempt_fit["fit_status"],
+                "headline_size_px": getattr(attempt_fit["font"], "size", None),
+                "accepted": False,
+            }
+            shift_attempts.append(attempt_record)
+            # First-pass accept: clearance + good fit (preferred).
+            if (
+                attempt_clearance["clearance_pass"]
+                and attempt_fit["fit_status"] in ("fits", "near_fit")
+            ):
+                attempt_record["accepted"] = True
+                final_fit = attempt_fit
+                final_clearance = attempt_clearance
+                final_box_pct = candidate_box
+                shift_success = True
+                shift_chosen_name = name
+                break
+
+        # Second-pass: when no fits/near_fit shift cleared the focal area,
+        # accept the best overflow shift that does. Better to render text
+        # taller than its target zone than to crowd the focal product.
+        if not shift_success:
+            overflow_winners = [
+                (idx, attempt_record)
+                for idx, attempt_record in enumerate(shift_attempts)
+                if attempt_record["clearance_pass"]
+                and attempt_record["fit_status"] == "overflow"
+            ]
+            if overflow_winners:
+                # Pick the one with the largest gap_px (most clearance).
+                idx, _ = max(
+                    overflow_winners,
+                    key=lambda x: x[1]["gap_px"] or 0,
+                )
+                # Re-run the fit so we have the font/lines objects in hand.
+                accepted_box = candidates_for_shift[idx][1]
+                attempt_fit = _fit_in_box(accepted_box)
+                attempt_clearance = _clearance_metrics(
+                    attempt_fit["rendered_bbox_pct"], safe_zone_pct,
+                    target_w, target_h, min_gap_px,
+                )
+                shift_attempts[idx]["accepted"] = True
+                shift_attempts[idx]["accepted_overflow_fallback"] = True
+                final_fit = attempt_fit
+                final_clearance = attempt_clearance
+                final_box_pct = accepted_box
+                shift_success = True
+                shift_chosen_name = (
+                    f"{candidates_for_shift[idx][0]}_overflow_fallback"
+                )
+
+    # Update derived box state from the final fit (whether or not a shift won).
+    selected_box_pct = final_box_pct
+    bx0, by0, bx1, by1 = selected_box_pct
+    hb = (
+        int(bx0 * target_w), int(by0 * target_h),
+        int(bx1 * target_w), int(by1 * target_h),
+    )
+    box_w = hb[2] - hb[0]
+    box_h = hb[3] - hb[1]
+    headline_font = final_fit["font"]
+    headline_lines = final_fit["lines"]
+    headline_total_h = final_fit["total_h"]
+    headline_scale_reason = final_fit["scale_reason"]
+    headline_fit_status = final_fit["fit_status"]
+    rendered_bbox_px = final_fit["rendered_bbox_px"]
+    rendered_bbox_pct = final_fit["rendered_bbox_pct"]
+
+    # Surface the rendered text bbox to _choose_text_treatment so background
+    # sampling matches what the type actually covers (not the wider box).
+    text_render_box = rendered_bbox_px
 
     # 1) Contrast-aware overlay + text-color selection. Reads brand.qc as
     #    guidance only (no pass/fail decision here). QCCheckerAgent is the
@@ -1477,6 +2763,35 @@ def compose_creative(
     )
     text_rgb = _hex_to_rgb(text_hex) + (255,)
     draw = ImageDraw.Draw(canvas)
+
+    # Post-render color refinement: re-sample the bg under the rendered text
+    # bbox (now that the overlay is painted) and pick whichever brand text
+    # color yields the higher contrast. Records every candidate's contrast
+    # so the report can show the selection rationale.
+    headline_color_candidates_meta: list[dict] = []
+    refined_bg_rgb = _box_mean_rgb_ext(canvas, rendered_bbox_px)
+    for color_hex in (
+        guidelines.typography.text_color_on_dark,
+        guidelines.typography.text_color_on_light,
+    ):
+        ratio_local = _contrast.contrast_ratio(_contrast.hex_to_rgb(color_hex), refined_bg_rgb)
+        headline_color_candidates_meta.append({
+            "color": color_hex,
+            "contrast": round(ratio_local, 2),
+        })
+    headline_color_candidates_meta.sort(key=lambda c: c["contrast"], reverse=True)
+    refined_color_hex = headline_color_candidates_meta[0]["color"]
+    headline_color_selection_reason = (
+        f"sampled rendered-text bbox; picked {refined_color_hex} "
+        f"({headline_color_candidates_meta[0]['contrast']}:1) over "
+        f"{headline_color_candidates_meta[1]['color']} "
+        f"({headline_color_candidates_meta[1]['contrast']}:1)"
+        if len(headline_color_candidates_meta) > 1 else
+        f"single candidate {refined_color_hex}"
+    )
+    if refined_color_hex != text_hex:
+        text_hex = refined_color_hex
+        text_rgb = _hex_to_rgb(text_hex) + (255,)
 
     # Vertical anchor: top of headline = box top (headline grows downward).
     headline_top = hb[1]
@@ -1558,24 +2873,37 @@ def compose_creative(
         y += line_step
 
     # Brand accent (rendered after headline so it can frame the headline box).
-    canvas = _render_accent(
+    canvas, accent_meta = _render_accent(
         canvas, layout, guidelines,
         text_box_px=hb,
         headline_top_px=headline_top,
         headline_bottom_px=headline_bottom,
+        ratio=ratio,
     )
 
-    # Disclaimer.
+    # Disclaimer. Use the new candidate-box scorer when configured;
+    # otherwise fall back to the legacy single-zone placement.
     disclaimer_box_meta: list[int] | None = None
     disclaimer_placement_box_meta: list[int] | None = None
     disclaimer_badge_box: list[int] | None = None
     disclaimer_badge_color_hex: str | None = None
+    disclaimer_selection_meta: dict | None = None
     d_font = None
     if disclaimer:
-        db = _disclaimer_box(
+        legacy_db = _disclaimer_box(
             target_w, target_h, hb, headline_bottom,
             layout.disclaimer_placement, layout.disclaimer_padding_pct,
         )
+        disclaimer_selection_meta = select_disclaimer_box(
+            canvas, layout, ratio,
+            focal_safe_zone_pct=safe_zone_pct,
+            text_color_options=[
+                guidelines.typography.text_color_on_dark,
+                guidelines.typography.text_color_on_light,
+            ],
+            fallback_box_px=legacy_db,
+        )
+        db = disclaimer_selection_meta["box_px"]
         d_w = max(1, db[2] - db[0])
         d_h = max(1, db[3] - db[1])
 
@@ -1593,7 +2921,7 @@ def compose_creative(
             d_max_for_fit = max(d_min_px, int(target_h * body_ratio))
 
         draw_d = ImageDraw.Draw(canvas)
-        d_font, d_lines, d_total_h, _ = _fit_text_with_pixel_bounds(
+        d_font, d_lines, d_total_h, _, _ = _fit_text_with_pixel_bounds(
             draw_d, disclaimer,
             guidelines.typography.body_font, fonts_dir,
             min_size_px=d_min_px,
@@ -1675,8 +3003,20 @@ def compose_creative(
         disclaimer_box_meta = [d_text_x0, db[1], d_text_x1, db[1] + d_total_render_h]
         disclaimer_placement_box_meta = [db[0], db[1], db[2], db[3]]
 
-    # 5) logo
-    canvas, logo_meta = stamp_logo(canvas, guidelines)
+    # 5) logo — pre-compute footprint, then iterate
+    #    ``visual_identity.logo_allowed_positions`` until one clears the
+    #    focal safe zone. Falls back to the configured corner with a
+    #    selection_reason warning when none of the alternates work.
+    logo_w_for_pick, logo_h_for_pick = _compute_logo_footprint(
+        target_w, target_h, guidelines,
+    )
+    logo_pick = select_logo_position(
+        target_w, target_h, logo_w_for_pick, logo_h_for_pick,
+        guidelines, ratio, focal_safe_zone_pct=safe_zone_pct,
+    )
+    canvas, logo_meta = stamp_logo(
+        canvas, guidelines, placement_override=logo_pick["placement"],
+    )
 
     # 6) save
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1756,36 +3096,96 @@ def compose_creative(
         "headline_region_edge_density": headline_box_selection["edge_density"],
         "headline_region_contrast_estimate": headline_box_selection["contrast_estimate"],
         "headline_box_candidates": all_candidate_scores,
-        # Headline-box adjustment audit (post-selection shrink/shift to
-        # widen the gap to the focal area when near-miss is detected).
-        "headline_box_original": headline_box_selection.get("headline_box_original"),
-        "headline_box_adjusted": headline_box_selection.get("headline_box_adjusted"),
-        "headline_box_adjustment_reason": headline_box_selection.get("headline_box_adjustment_reason"),
+        # Headline-box adjustment audit. ``headline_box_original`` is the
+        # candidate box the scorer picked; ``headline_box_adjusted`` records
+        # whether a shift won. ``headline_box_shift_attempts`` lists every
+        # shift the cascade tried (including rejected ones) so reviewers can
+        # audit why the final box was chosen.
+        "headline_box_original": headline_box_original_pct,
+        "headline_box_adjusted": (
+            list(selected_box_pct)
+            if list(selected_box_pct) != headline_box_original_pct else None
+        ),
+        "headline_box_adjustment_reason": (
+            f"shift_cascade:{shift_chosen_name}" if shift_chosen_name
+            else headline_box_selection.get("headline_box_adjustment_reason")
+        ),
+        "headline_box_shift_attempts": shift_attempts,
+        "headline_box_shift_success": shift_success,
         # Color picked for the headline (alias of text_color_used; explicit
         # surface for the report's headline_color_selected field).
         "headline_color_selected": text_hex,
+        "headline_color_candidates": headline_color_candidates_meta,
+        "headline_color_selection_reason": headline_color_selection_reason,
         # Wrap/scale audit.
         "headline_wrap_variant": f"{len(headline_lines)}_lines_at_{getattr(headline_font, 'size', 0)}px",
         "headline_scale_reason": headline_scale_reason,
         "headline_fit_status": headline_fit_status,
-        # Prominence score: how confidently the composer used its configured
-        # ceiling. 1.0 = chose the brand's headline_max; ~0.5 = stayed near
-        # the floor. Lets a reviewer spot timid renders at a glance.
-        "headline_prominence_score": round(
-            getattr(headline_font, "size", 0) / max(1, headline_max_px), 3
+        # Rendered text bbox in pixel coords — the *actual* text area on
+        # canvas, accounting for line wrapping width and alignment. This is
+        # the bbox QC and the prominence score sample under, not the full
+        # candidate box.
+        "rendered_headline_bbox": list(rendered_bbox_px),
+        "rendered_headline_bbox_pct": [round(c, 4) for c in rendered_bbox_pct],
+        # Prominence score: weighted combination of size-vs-ceiling, zone
+        # fill, line count, fit, contrast, and clearance. >= 0.7 = confident
+        # campaign hero; <= 0.5 = timid caption-sized render. Components are
+        # surfaced separately so the report can audit which factor pulled it
+        # down. See ``_compute_prominence_score`` for the formula.
+        **_compute_prominence_score(
+            font_size_px=getattr(headline_font, "size", 0),
+            max_size_px=headline_max_px,
+            min_size_px=headline_min_px,
+            zone_fill_pct=headline_total_h / max(1, box_h),
+            target_zone_fill_pct=(
+                typo_per_aspect.headline_target_zone_fill_pct
+                if typo_per_aspect is not None else 0.5
+            ),
+            line_count=len(headline_lines),
+            preferred_lines=preferred_lines,
+            min_lines=per_aspect.min_line_count,
+            max_lines=per_aspect.max_line_count,
+            fit_status=headline_fit_status,
+            contrast=composer_contrast,
+            clearance_pass=final_clearance["clearance_pass"],
+            collision=final_clearance["collision"],
+            near_miss=final_clearance["near_miss"],
         ),
         "headline_max_size_px_configured": headline_max_px,
         "headline_min_size_px_configured": headline_min_px,
         "headline_target_h_px": headline_target_h,
-        # Focal-area + product-safe-zone audit.
+        "headline_target_zone_fill_pct": (
+            typo_per_aspect.headline_target_zone_fill_pct
+            if typo_per_aspect is not None else None
+        ),
+        "headline_font_size_px": getattr(headline_font, "size", None),
+        # Focal-area + product-safe-zone audit. ``text_object_*`` fields now
+        # reflect the *rendered text bbox* (not the candidate box), which is
+        # the visually meaningful clearance.
         "focal_area_estimate": focal_meta["focal_area_estimate"],
         "product_safe_zone_box": focal_meta["product_safe_zone_box"],
         "expanded_product_safe_zone_box": focal_meta.get("expanded_product_safe_zone_box"),
         "focal_overlap_detected": focal_meta["focal_overlap_detected"],
         "focal_near_miss_detected": focal_meta.get("focal_near_miss_detected", False),
         "focal_overlap_pct": focal_meta["focal_overlap_pct"],
-        "text_object_gap_px": focal_meta.get("text_object_gap_px"),
-        "text_object_clearance_pass": focal_meta.get("text_object_clearance_pass"),
+        "text_object_gap_px": final_clearance["gap_px"],
+        "text_object_clearance_pass": final_clearance["clearance_pass"],
+        "text_object_collision_detected": final_clearance["collision"],
+        "text_object_near_miss_detected": final_clearance["near_miss"],
+        "all_candidates_failed_clearance": focal_meta.get(
+            "all_candidates_failed_clearance", False
+        ),
+        "clearance_failure_reason": (
+            None if final_clearance["clearance_pass"]
+            else (
+                "rendered_text_bbox_collides_with_focal_safe_zone"
+                if final_clearance["collision"]
+                else f"rendered_text_bbox_within_{min_gap_px}px_of_focal_safe_zone"
+                if final_clearance["near_miss"]
+                else "unknown"
+            )
+        ),
+        "min_text_object_gap_px_threshold": min_gap_px,
         # Disclaimer clearance audit — gap from disclaimer rendered text bbox
         # to the focal/product safe zone, and pass/fail flag.
         "disclaimer_text_object_gap_px": (
@@ -1809,12 +3209,94 @@ def compose_creative(
         "disclaimer_badge_box": disclaimer_badge_box,
         "disclaimer_badge_color": disclaimer_badge_color_hex,
         "disclaimer_placement_box": disclaimer_placement_box_meta,
+        # Disclaimer candidate-box selection audit (when configured).
+        "disclaimer_candidate_index": (
+            disclaimer_selection_meta.get("candidate_index")
+            if disclaimer_selection_meta else None
+        ),
+        "disclaimer_candidate_attempts": (
+            disclaimer_selection_meta.get("candidate_attempts")
+            if disclaimer_selection_meta else None
+        ),
+        "disclaimer_position_selected": (
+            f"candidate_{disclaimer_selection_meta['candidate_index']}"
+            if disclaimer_selection_meta and disclaimer_selection_meta.get("candidate_index") is not None
+            else layout.disclaimer_placement.value
+        ),
+        "disclaimer_position_configured": layout.disclaimer_placement.value,
+        "disclaimer_selection_reason": (
+            disclaimer_selection_meta.get("selection_reason")
+            if disclaimer_selection_meta else None
+        ),
         # Headline zone fill — telemetry, not a target. (rendered_h / box_h)
         "headline_zone_fill_pct": round(headline_total_h / max(1, box_h), 3),
         # Surface the disclaimer text color the composer actually used —
         # picked independently from the headline based on the disclaimer
         # area's bg, so QC and reviewers see the right color.
         "disclaimer_text_color": disclaimer_text_hex if disclaimer else None,
+        # Crop-scoring audit (the new anti-clip stage).
+        "crop_strategy_used": crop_meta.get("crop_strategy_used"),
+        "crop_box_used": crop_meta.get("crop_box_used"),
+        "crop_box_candidates": crop_meta.get("crop_box_candidates"),
+        "crop_box_scores": crop_meta.get("crop_box_scores"),
+        "focal_edge_gap_px": crop_meta.get("focal_edge_gap_px"),
+        "focal_edge_min_gap_px": crop_meta.get("min_edge_gap_px"),
+        "focal_edge_clearance_pass": crop_meta.get("focal_edge_clearance_pass"),
+        "focal_edge_clip_detected": crop_meta.get("focal_edge_clip_detected"),
+        "focal_edges_touched": crop_meta.get("edges_touched"),
+        "crop_edge_clip_penalty_applied": crop_meta.get("crop_edge_clip_penalty_applied"),
+        # Letterbox fallback audit (only set when the crop scorer ran out
+        # of viable offsets and the layout had letterboxing enabled).
+        "letterbox_applied": crop_meta.get("letterbox_applied", False),
+        "letterbox_pad_pct": crop_meta.get("letterbox_pad_pct"),
+        "letterbox_color_used": crop_meta.get("letterbox_color_used"),
+        "letterbox_color_source": crop_meta.get("letterbox_color_source"),
+        # Headline wrap strategy ("greedy" or "balanced") + adaptive
+        # widening audit. Together these explain how the headline went
+        # from a narrow candidate to its final hero-scale rendering.
+        "headline_wrap_strategy": final_fit.get("wrap_strategy"),
+        "headline_box_widened": headline_box_widened,
+        "headline_box_width_delta_pct": round(widen_delta_pct, 4),
+        "headline_box_pre_widen_pct": [round(c, 4) for c in pre_widen_box_pct],
+        "headline_widen_reason": widen_reason,
+        # Logo placement audit.
+        "logo_position_selected": logo_pick.get("logo_position_selected"),
+        "logo_position_configured": logo_pick.get("logo_position_configured"),
+        "logo_position_adjusted": logo_pick.get("logo_position_adjusted"),
+        "logo_product_gap_px": logo_pick.get("logo_product_gap_px"),
+        "logo_product_clearance_pass": logo_pick.get("logo_product_clearance_pass"),
+        "logo_collision_detected": logo_pick.get("logo_collision_detected"),
+        "logo_selection_reason": logo_pick.get("logo_selection_reason"),
+        "logo_position_attempts": logo_pick.get("logo_position_attempts"),
+        "logo_min_required_gap_px": logo_pick.get("logo_min_required_gap_px"),
+        # Accent safe-zone audit.
+        "accent_line_box": accent_meta.get("accent_line_box"),
+        "accent_edge_gap_px": accent_meta.get("accent_edge_gap_px"),
+        "accent_safe_zone_pass": accent_meta.get("accent_safe_zone_pass"),
+        # Composition score: weighted aggregate of crop / logo / headline /
+        # accent / disclaimer health. Warnings name every issue still on
+        # the canvas so reviewers can spot regressions at a glance.
+        **_compute_composition_score(
+            crop_clearance_pass=bool(crop_meta.get("focal_edge_clearance_pass")),
+            crop_clip_detected=bool(crop_meta.get("focal_edge_clip_detected")),
+            logo_clearance_pass=bool(logo_pick.get("logo_product_clearance_pass")),
+            logo_collision=bool(logo_pick.get("logo_collision_detected")),
+            headline_prominence=(
+                getattr(headline_font, "size", 0) / max(1, headline_max_px)
+            ),
+            headline_clearance_pass=bool(final_clearance["clearance_pass"]),
+            headline_too_small=(
+                getattr(headline_font, "size", 0) <= headline_min_px
+            ),
+            accent_safe_zone_pass=bool(accent_meta.get("accent_safe_zone_pass", True)),
+            disclaimer_clearance_pass=(
+                bool(disclaimer_selection_meta.get("clearance_pass"))
+                if disclaimer_selection_meta else True
+            ),
+            all_text_candidates_failed=bool(
+                focal_meta.get("all_candidates_failed_clearance", False)
+            ),
+        ),
     }
 
 

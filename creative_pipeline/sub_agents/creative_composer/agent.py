@@ -1,12 +1,30 @@
-"""CreativeComposerAgent — produces every aspect ratio × every market per product.
+"""CreativeComposerAgent — produces every aspect ratio × every (market, locale) per product.
 
-Localization is **explicit** and driven by the brief:
-  - localized_copy=False (default): every (market, ratio) renders the same
-    primary ``brief.campaign_message`` in ``brief.language``. No translation,
-    no inference. Output filenames use ``{market}_{language}``.
-  - localized_copy=True: per-market locale picked via ``brand.market_locales``;
-    headline pulled from ``brief.campaign_message_localized[locale]`` (with
-    per-product override taking precedence when set).
+Localization is **explicit** and driven by the brief. Three modes, in
+precedence order:
+
+  1. ``output_locales`` set (e.g. ``["en","es","pt"]``): the composer fans
+     out as ``markets × output_locales``. Each (market, locale) produces
+     one file. The brief author controls cardinality via the ``markets``
+     list — e.g. ``markets=["US"]`` × ``output_locales=["en","es","pt"]``
+     = 3 files per ratio per product, not 9. Headlines come from
+     ``campaign_message_localized[locale]``; disclaimers from
+     ``disclaimer_text_localized[locale]`` (with per-market and brand-level
+     fallbacks below). This mode decouples *distribution market* from
+     *rendered language*.
+  2. ``localized_copy=True`` (without ``output_locales``): per-market locale
+     picked via ``brand.market_locales``; headline pulled from
+     ``brief.campaign_message_localized[locale]`` (with per-product override
+     taking precedence when set).
+  3. ``localized_copy=False`` (default): every (market, ratio) renders the
+     same primary ``brief.campaign_message`` in ``brief.language``. No
+     translation, no inference. Output filenames use ``{market}_{language}``.
+
+The image-gen prompt cue stays tied to ``brief.language`` regardless of
+which localization mode is active — one source hero per product, shared
+across every (market, locale) output. Per-locale hero generation is
+intentionally not implemented (would multiply Imagen API cost by
+``len(output_locales)``).
 """
 
 from __future__ import annotations
@@ -57,93 +75,100 @@ class CreativeComposerAgent(BaseAgent):
 
         outputs: list[dict] = []
         for market in brief.markets:
-            # Resolve copy + locale per the explicit localization contract.
-            if brief.localized_copy:
+            # Resolve the locale list to fan out for this market. Three
+            # branches in precedence order:
+            #   1. brief.output_locales — explicit per-locale fan-out
+            #   2. brief.localized_copy — per-market locale via brand.market_locales
+            #   3. neither — single-language using brief.language
+            if brief.output_locales:
+                locales_for_market = list(brief.output_locales)
+            elif brief.localized_copy:
                 available_locales = list(brief.campaign_message_localized.keys())
-                locale = pick_locale(
-                    market=market,
-                    available_locales=available_locales,
-                    market_locales=brand.market_locales,
-                    fallback_language=brief.language,
-                )
-                # Per-product override beats the brief-wide localized message.
-                if product.campaign_message:
-                    headline = product.campaign_message
-                else:
-                    headline = (
-                        brief.campaign_message_localized.get(locale)
-                        or brief.campaign_message
+                locales_for_market = [
+                    pick_locale(
+                        market=market,
+                        available_locales=available_locales,
+                        market_locales=brand.market_locales,
+                        fallback_language=brief.language,
                     )
+                ]
             else:
-                # Localization disabled — single-language run. ``brief.language``
-                # is authoritative: when it matches a key in
-                # ``campaign_message_localized``, that entry wins over the
-                # primary ``campaign_message``. This means a brief author
-                # can flip ``language: es`` and the rendered text follows
-                # without rewriting ``campaign_message`` — matching what
-                # the inline brief comment promises.
-                # Resolution order (most specific wins):
+                locales_for_market = [brief.language]
+
+            for locale in locales_for_market:
+                # Headline resolution (most specific wins):
                 #   1. product.campaign_message                            (per-product override)
-                #   2. brief.campaign_message_localized[brief.language]    (NEW — language is a directive)
+                #   2. brief.campaign_message_localized[locale]            (per-locale entry)
                 #   3. brief.campaign_message                              (fallback)
-                locale = brief.language
                 headline = (
                     product.campaign_message
-                    or brief.campaign_message_localized.get(brief.language)
+                    or brief.campaign_message_localized.get(locale)
                     or brief.campaign_message
                 )
 
-            # Disclaimer resolution order (most specific wins):
-            #   1. brief.disclaimer_text_localized[market]            (when localized_legal_copy=True)
-            #   2. brief.disclaimer_text_localized[brief.language]    (fallback localized)
-            #   3. brand.legal.required_disclaimers[market]           (when localized_legal_copy=True)
-            #   4. brief.disclaimer_text                              (single-language brief override)
-            #   5. brand.legal.default_disclaimer                     (compliance boilerplate)
-            #
-            # The brief is intended to own campaign-specific copy
-            # ("Sale ends Dec 31"); brand legal stays as the fallback
-            # for compliance boilerplate the marketing team isn't
-            # rewriting per campaign.
-            disclaimer = None
-            if brief.localized_legal_copy:
-                disclaimer = (
-                    brief.disclaimer_text_localized.get(market)
-                    or brief.disclaimer_text_localized.get(brief.language)
-                    or brand.legal.required_disclaimers.get(market)
-                )
-            if disclaimer is None:
-                disclaimer = brief.disclaimer_text or brand.legal.default_disclaimer
+                # Disclaimer resolution order (most specific wins):
+                #   1. brief.disclaimer_text_localized[locale]            (per-locale, when localized_legal_copy=True)
+                #   2. brief.disclaimer_text_localized[market]            (per-market, when localized_legal_copy=True)
+                #   3. brief.disclaimer_text_localized[brief.language]    (fallback localized)
+                #   4. brand.legal.required_disclaimers[market]           (when localized_legal_copy=True)
+                #   5. brief.disclaimer_text                              (single-language brief override)
+                #   6. brand.legal.default_disclaimer                     (compliance boilerplate)
+                #
+                # Step 1 (per-locale lookup) is what makes US_es.png get a
+                # Spanish disclaimer when ``output_locales`` is in play —
+                # without it, ``required_disclaimers`` (keyed by market)
+                # would yield the same string for every locale variant.
+                disclaimer = None
+                if brief.localized_legal_copy:
+                    disclaimer = (
+                        brief.disclaimer_text_localized.get(locale)
+                        or brief.disclaimer_text_localized.get(market)
+                        or brief.disclaimer_text_localized.get(brief.language)
+                        or brand.legal.required_disclaimers.get(market)
+                    )
+                if disclaimer is None:
+                    disclaimer = brief.disclaimer_text or brand.legal.default_disclaimer
 
-            for ratio in ratios:
-                out_path = output_path(output_dir, self.product_id, ratio, market, locale)
-                meta = compose_creative(
-                    hero_path=hero_path,
-                    ratio=ratio,
-                    headline=headline,
-                    disclaimer=disclaimer,
-                    guidelines=brand,
-                    layout=layout,
-                    out_path=out_path,
-                )
-                meta.update({
-                    "market": market,
-                    "locale": locale,
-                    "headline": headline,
-                    "disclaimer_text": disclaimer,
-                })
-                outputs.append(meta)
-                logger.info(
-                    "composed %s/%s %s_%s in %dms (localized_copy=%s, localized_legal=%s)",
-                    self.product_id, ratio, market, locale, meta["duration_ms"],
-                    brief.localized_copy, brief.localized_legal_copy,
-                )
+                for ratio in ratios:
+                    out_path = output_path(output_dir, self.product_id, ratio, market, locale)
+                    meta = compose_creative(
+                        hero_path=hero_path,
+                        ratio=ratio,
+                        headline=headline,
+                        disclaimer=disclaimer,
+                        guidelines=brand,
+                        layout=layout,
+                        out_path=out_path,
+                    )
+                    meta.update({
+                        "market": market,
+                        "locale": locale,
+                        "headline": headline,
+                        "disclaimer_text": disclaimer,
+                    })
+                    outputs.append(meta)
+                    logger.info(
+                        "composed %s/%s %s_%s in %dms (localized_copy=%s, localized_legal=%s, output_locales=%s)",
+                        self.product_id, ratio, market, locale, meta["duration_ms"],
+                        brief.localized_copy, brief.localized_legal_copy,
+                        bool(brief.output_locales),
+                    )
 
         product_state["outputs"] = outputs
         product_state["layout_template"] = brief.layout_template
         product_state["language"] = brief.language
         product_state["localized_copy"] = brief.localized_copy
         product_state["localized_legal_copy"] = brief.localized_legal_copy
+        product_state["output_locales"] = list(brief.output_locales) if brief.output_locales else None
         product_state["creative_quality"] = brief.creative_quality.value
+
+        if brief.output_locales:
+            shape = (
+                f"{len(brief.markets)} markets × {len(brief.output_locales)} locales × "
+                f"{len(ratios)} ratios"
+            )
+        else:
+            shape = f"{len(brief.markets)} markets × {len(ratios)} ratios"
 
         yield Event(
             author=self.name,
@@ -151,8 +176,9 @@ class CreativeComposerAgent(BaseAgent):
                 role="model",
                 parts=[types.Part(text=(
                     f"Composed {len(outputs)} creatives for {self.product_id} "
-                    f"({len(brief.markets)} markets × {len(ratios)} ratios) — "
-                    f"language={brief.language}, localized_copy={brief.localized_copy}, "
+                    f"({shape}) — language={brief.language}, "
+                    f"localized_copy={brief.localized_copy}, "
+                    f"output_locales={list(brief.output_locales) if brief.output_locales else None}, "
                     f"layout={brief.layout_template}."
                 ))],
             ),

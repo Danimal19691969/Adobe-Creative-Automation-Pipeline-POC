@@ -549,7 +549,7 @@ class CampaignBrief(BaseModel):
 
     # Localization contract — explicit, not inferred.
     language: str = Field(default="en", min_length=2, max_length=5)
-    localized_copy: bool = False
+    localized_copy: bool = True
     # When False (default), every market renders the brand's default English
     # disclaimer regardless of brand.legal.required_disclaimers.
     # When True, the per-market localized disclaimer is rendered.
@@ -582,6 +582,15 @@ class CampaignBrief(BaseModel):
     # Optional locale-keyed override map (rendered when localized_copy=True).
     campaign_message_localized: dict[str, str] = Field(default_factory=dict)
 
+    # Explicit list of locales to render per market, e.g. ["en", "es", "pt"].
+    # When set, the composer fans out as ``markets × output_locales`` —
+    # decoupling distribution market from rendered language. The user
+    # controls cardinality via the ``markets`` list (e.g. markets=["US"]
+    # with output_locales=["en","es","pt"] yields one creative per locale,
+    # not three). When None, falls back to the existing market-driven
+    # locale resolution (``localized_copy`` + ``brand.market_locales``).
+    output_locales: Optional[list[str]] = None
+
     # Campaign-specific disclaimer override. When set, this wins over
     # ``brand.legal.default_disclaimer`` / ``brand.legal.required_disclaimers``.
     # Brand legal text remains the fallback when neither field is provided
@@ -605,4 +614,21 @@ class CampaignBrief(BaseModel):
                 # When localized_copy is on, the primary language must have a localized entry
                 # so it can be used as a baseline / fallback. Auto-populate from campaign_message.
                 self.campaign_message_localized[self.language] = self.campaign_message
+        return self
+
+    @model_validator(mode="after")
+    def _output_locales_consistency(self) -> "CampaignBrief":
+        if self.output_locales is None:
+            return self
+        if not self.output_locales:
+            raise ValueError("output_locales must be a non-empty list when set")
+        if len(self.output_locales) != len(set(self.output_locales)):
+            raise ValueError(f"output_locales contains duplicate entries: {self.output_locales}")
+        missing = [loc for loc in self.output_locales if loc not in self.campaign_message_localized]
+        if missing:
+            raise ValueError(
+                f"output_locales {missing} have no entry in campaign_message_localized "
+                f"(available: {sorted(self.campaign_message_localized.keys())}). "
+                f"Cannot render a headline for a locale that has no localized message."
+            )
         return self

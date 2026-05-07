@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
+import re
+import shutil
 import sys
+from pathlib import Path
 
 from google.adk.runners import InMemoryRunner
 from google.genai import types
@@ -30,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_DROPBOX_ROOT = "/TD-Creative-Pipeline-POC"
+_REPORT_NAME_RE = re.compile(r"^report_\d{8}T\d{6}Z\.(json|md)$")
 
 
 def _env_truthy(name: str) -> bool:
@@ -62,7 +67,88 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Sets DROPBOX_CREATE_SHARED_LINKS=true (best-effort public "
              "links for report/gallery files). Default: off.",
     )
+    parser.add_argument(
+        "--clean-outputs",
+        action="store_true",
+        default=False,
+        help="Delete everything under OUTPUT_DIR before the run "
+             "(preserving outputs/.gitkeep). Equivalent to "
+             "`rm -rf outputs/* && touch outputs/.gitkeep`. Default: off.",
+    )
+    parser.add_argument(
+        "--keep-reports",
+        type=int,
+        default=None,
+        metavar="N",
+        help="After the run, prune older report_*.json/.md pairs and "
+             "matching dropbox_upload_*.json manifests so only the "
+             "newest N report timestamps remain. Default: keep everything.",
+    )
     return parser.parse_args(argv)
+
+
+def _clean_outputs_dir(outputs_dir: Path) -> int:
+    """`--clean-outputs` implementation. Removes everything under
+    ``outputs/`` (file or subdir), then re-touches ``.gitkeep`` so the
+    directory stays tracked by git. Returns the number of top-level
+    entries removed."""
+    if not outputs_dir.exists():
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        (outputs_dir / ".gitkeep").touch()
+        return 0
+    removed = 0
+    for entry in outputs_dir.iterdir():
+        if entry.name == ".gitkeep":
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+        removed += 1
+    (outputs_dir / ".gitkeep").touch()
+    return removed
+
+
+def _prune_old_reports(outputs_dir: Path, keep: int) -> dict:
+    """`--keep-reports N` implementation. Sorts the timestamped
+    ``report_*.json`` files, keeps the newest N, deletes the rest along
+    with their matching ``.md`` and ``dropbox_upload_*.json`` files.
+    Never touches the convenience ``latest_report.{json,md}`` copies.
+
+    Returns a dict with `kept` and `removed` lists (timestamps) for the
+    final summary print."""
+    if keep < 0:
+        return {"kept": [], "removed": []}
+    json_reports = sorted(
+        (p for p in outputs_dir.glob("report_*.json") if _REPORT_NAME_RE.match(p.name)),
+        key=lambda p: p.name,
+    )
+    if len(json_reports) <= keep:
+        return {
+            "kept": [p.stem.removeprefix("report_") for p in json_reports],
+            "removed": [],
+        }
+    to_keep = set(json_reports[-keep:]) if keep > 0 else set()
+    removed_ts: list[str] = []
+    for p in json_reports:
+        if p in to_keep:
+            continue
+        ts = p.stem.removeprefix("report_")
+        # Pair: matching .md + matching dropbox_upload_<ts>.json
+        for sibling in (
+            p,
+            outputs_dir / f"report_{ts}.md",
+            outputs_dir / f"dropbox_upload_{ts}.json",
+        ):
+            try:
+                sibling.unlink(missing_ok=True)
+            except OSError:
+                pass
+        removed_ts.append(ts)
+    return {
+        "kept": [p.stem.removeprefix("report_") for p in to_keep],
+        "removed": removed_ts,
+    }
 
 
 def _apply_dropbox_env_from_args(args: argparse.Namespace) -> None:
@@ -107,9 +193,87 @@ def _dropbox_preflight_or_warn() -> None:
     print("", file=sys.stderr)
 
 
+def _print_compact_summary(
+    args: argparse.Namespace,
+    final_state: dict,
+    pruned: dict | None,
+) -> None:
+    """One-screen summary at the end of the run so the operator doesn't
+    have to scroll through a multi-thousand-line log to see whether
+    anything failed. Reads paths from final state, opens the Markdown
+    report for status flags."""
+    json_path = final_state.get("report_path") or "<missing>"
+    md_path = final_state.get("markdown_report_path") or "<missing>"
+    db_meta = final_state.get("dropbox_upload_meta") or {}
+
+    # Pull overall statuses from the JSON report (single source of truth).
+    brand = legal = qc = "unknown"
+    products_summary: list[str] = []
+    if final_state.get("report_path"):
+        try:
+            report = json.loads(Path(final_state["report_path"]).read_text())
+            ranks = {"pass": 0, "n/a": 0, None: 0, "warn": 1, "fail": 2}
+            def _worst(values):
+                vals = list(values)
+                return max(vals, key=lambda v: ranks.get(v, 0)) if vals else "n/a"
+            brand = _worst(p.get("brand_check_summary") for p in report.get("products", []))
+            legal = _worst(p.get("legal_check_summary") for p in report.get("products", []))
+            qc = _worst(p.get("qc_check_summary") for p in report.get("products", []))
+            for p in report.get("products", []):
+                products_summary.append(
+                    f"  - {p.get('product_id', '?')}: {len(p.get('outputs') or [])} "
+                    f"outputs, QC {p.get('qc_check_summary', 'n/a')}"
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    print()
+    print("Run complete.")
+    print(f"Report JSON:     {json_path}")
+    print(f"Report Markdown: {md_path}")
+    if Path("outputs/latest_report.md").exists():
+        print(f"Latest copies:   outputs/latest_report.json, outputs/latest_report.md")
+    if db_meta.get("enabled"):
+        if "dropbox_run_folder" in db_meta:
+            print(
+                f"Dropbox:         uploaded {db_meta.get('uploaded_count', 0)} files "
+                f"to {db_meta['dropbox_run_folder']} "
+                f"(failures={db_meta.get('failures', 0)})"
+            )
+        else:
+            print(
+                f"Dropbox:         skipped ({db_meta.get('reason', 'unknown')})"
+            )
+    else:
+        print("Dropbox:         not enabled (set DROPBOX_UPLOAD_ENABLED=true to upload)")
+    if pruned and pruned.get("removed"):
+        print(
+            f"Reports pruned:  kept {len(pruned['kept'])}, "
+            f"removed {len(pruned['removed'])} older report(s)"
+        )
+    print()
+    print("Overall:")
+    print(f"  Brand: {brand}")
+    print(f"  Legal: {legal}")
+    print(f"  QC:    {qc}")
+    if products_summary:
+        print()
+        print("Products:")
+        for line in products_summary:
+            print(line)
+    print()
+
+
 async def main() -> int:
     args = _parse_args()
     _apply_dropbox_env_from_args(args)
+
+    outputs_dir = Path(os.environ.get("OUTPUT_DIR", "outputs"))
+    if args.clean_outputs:
+        removed_count = _clean_outputs_dir(outputs_dir)
+        print(f"CLEAN_OUTPUTS: removed {removed_count} entries from {outputs_dir}/ "
+              f"(preserved .gitkeep)")
+
     _dropbox_preflight_or_warn()
 
     # Import the agent AFTER env vars are applied so any future env-driven
@@ -134,29 +298,17 @@ async def main() -> int:
     if not report_path:
         print("ERROR: pipeline finished without a report_path", file=sys.stderr)
         return 1
-    print(f"REPORT: {report_path}")
 
-    # Surface the Dropbox upload result for at-a-glance scanning. The
-    # agent has already written the manifest and emitted its summary
-    # event; this line just lifts the structured meta into stdout.
-    db_meta = final.state.get("dropbox_upload_meta") or {}
-    if db_meta.get("enabled"):
-        if "dropbox_run_folder" in db_meta:
-            print(
-                f"DROPBOX_UPLOAD: enabled=true folder={db_meta['dropbox_run_folder']} "
-                f"files={db_meta.get('uploaded_count', 0)} "
-                f"failures={db_meta.get('failures', 0)}"
-            )
-            if db_meta.get("manifest_path"):
-                print(f"DROPBOX_MANIFEST: {db_meta['manifest_path']}")
-        else:
-            # Enabled but couldn't run — agent recorded a reason
-            # (no_report_path, no_campaign_id, config_error, …).
-            print(
-                f"DROPBOX_UPLOAD: enabled=true but skipped "
-                f"({db_meta.get('reason', 'unknown')})",
-                file=sys.stderr,
-            )
+    # Optional retention pruning — runs AFTER the report is written so
+    # the freshly-written report is always among the "newest N" kept.
+    pruned: dict | None = None
+    if args.keep_reports is not None:
+        pruned = _prune_old_reports(outputs_dir, args.keep_reports)
+
+    # Compact summary for at-a-glance scanning (replaces the older
+    # REPORT: / DROPBOX_UPLOAD: lines; full info lives in the Markdown
+    # report at outputs/report_<ts>.md).
+    _print_compact_summary(args, dict(final.state), pruned)
     return 0
 
 

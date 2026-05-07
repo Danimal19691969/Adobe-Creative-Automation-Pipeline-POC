@@ -195,6 +195,38 @@ class DropboxUploaderAgent(BaseAgent):
         }
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
+        # Re-render the Markdown report with the actual upload result so
+        # the reviewer-facing summary reflects "uploaded N files → folder"
+        # instead of "configured (pending upload)". JSON report is
+        # untouched — it doesn't carry upload info anyway (the manifest
+        # is the upload's audit trail). Failures here are non-fatal.
+        upload_meta_for_md = {
+            "enabled": True,
+            "dropbox_run_folder": result["dropbox_run_folder"],
+            "uploaded_count": result["uploaded_count"],
+            "failures": len(result["failures"]),
+            "shared_links": len(result["shared_links"]),
+            "manifest_path": str(manifest_path),
+        }
+        try:
+            json_report_path = state.get("report_path")
+            if json_report_path and os.path.exists(json_report_path):
+                from creative_pipeline.sub_agents.reporter.agent import (
+                    _write_report_pair,
+                )
+                report_dict = json.loads(Path(json_report_path).read_text())
+                _write_report_pair(
+                    output_dir=str(outputs_dir),
+                    timestamp=run_timestamp,
+                    report=report_dict,
+                    dropbox_meta=upload_meta_for_md,
+                    dropbox_manifest_path=str(manifest_path),
+                )
+        except Exception as e:  # noqa: BLE001 — Markdown is a nicety, never fatal
+            logger.warning(
+                "Could not regenerate markdown summary with upload result: %s", e
+            )
+
         text = (
             f"Dropbox upload: {result['uploaded_count']} files → "
             f"{result['dropbox_run_folder']} "

@@ -204,17 +204,31 @@ def test_composer_records_layout_boxes_and_overlay_metadata(brand_yaml, brief_ya
 
 def test_disclaimer_english_under_premium_layout(brand_yaml, brief_yaml, tmp_path, monkeypatch):
     """Regression: with the new layout, localized_legal_copy=false must still
-    produce the English default_disclaimer in every market."""
+    produce the English default_disclaimer in every market.
+
+    The live demo brief now ships with localized_legal_copy=true to drive
+    multi-locale rendering; we override that flag here so the test still
+    exercises the localized_legal_copy=False code path it was written for.
+    """
     _stage_brand_assets(tmp_path)
     monkeypatch.chdir(tmp_path)
-    pid = brief_yaml.products[0].id
+    # Override the live brief's localization flags so this test pins the
+    # localized_legal_copy=False contract regardless of the demo brief's
+    # current configuration.
+    brief = brief_yaml.model_copy(update={
+        "localized_copy": False,
+        "localized_legal_copy": False,
+        "output_locales": None,
+        "disclaimer_text_localized": {},
+    })
+    pid = brief.products[0].id
     asset_dir = tmp_path / "inputs" / "assets" / pid
     asset_dir.mkdir(parents=True)
     hero = asset_dir / "hero.png"
     Image.new("RGB", (1024, 1024), (180, 220, 240)).save(hero)
 
-    assert brief_yaml.localized_legal_copy is False
-    state = _make_state(brand_yaml, brief_yaml, str(hero), pid)
+    assert brief.localized_legal_copy is False
+    state = _make_state(brand_yaml, brief, str(hero), pid)
     agent = CreativeComposerAgent(name="CC", product_id=pid)
     delta = _run_composer(agent, state)
 

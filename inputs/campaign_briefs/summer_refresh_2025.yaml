@@ -1,43 +1,73 @@
+# =============================================================================
+# Localization model — three knobs, three jobs:
+#   markets         → DISTRIBUTION (filename prefix, e.g. US_*.png)
+#   output_locales  → LANGUAGES rendered per market (filename suffix, e.g. *_es.png)
+#   language        → image-gen prompt cue + fallback (one hero per product)
+#
+# Output count = products × ratios × markets × output_locales.
+# Current: 2 × 3 × 1 × 3 = 18 final creatives.
+# To drop Portuguese: remove `- pt` from output_locales below → 12 creatives.
+# =============================================================================
+
 campaign_id: summer_refresh_2025
 campaign_name: Summer Refresh 2025
 brand_id: aquacorp_global
-language: en # choose language es (spanish), en (english), or pt (portuguese) for this campaign. This will influence the language of the generated copy and any region-specific cultural cues in the imagery.
-localized_copy: false
-localized_legal_copy: false
+
+# Image-gen prompt cue ("English-speaking audience") + fallback if a locale
+# in output_locales has no entry in campaign_message_localized.
+language: en
+
+# true = render headlines from campaign_message_localized[locale] per output.
+localized_copy: true
+# true = render disclaimers from disclaimer_text_localized[locale] per output.
+localized_legal_copy: true
+
 force_generate_hero: true
 regenerate_cached_assets: true
 halt_on_qc_failure: false
+
+# Region cue injected into the image-gen prompt (cultural feel of the hero).
+# Does NOT control language fan-out — that's output_locales.
 target_region: LATAM
+
+# DISTRIBUTION market(s). Filename prefix. Add a second entry to ship the
+# same language set to another market (doubles output count).
 markets:
-- MX
-- BR
-- CO
+- US
+
 target_audience: Health-conscious adults 25-40
 creative_quality: demo_polished
 layout_template: premium_product_hero
 brand_palette_influence: medium
 generation_palette_hint: cyan, deep navy, clean white, fresh water tones, bright summer
   highlights, soft sky and ocean cues
+
+# Translation library. Every code in output_locales below MUST have an entry
+# here (validator enforces). Extra entries are harmless.
 campaign_message: Refresh your summer, naturally.
 campaign_message_localized:
-  en: Refresh your summer, naturally. # english
-  es: Refresca tu verano, naturalmente. # spanish
-  pt: "Renove seu ver\xE3o, naturalmente." # portuguese
+  en: Refresh your summer, naturally.
+  es: Refresca tu verano, naturalmente.
+  pt: "Renove seu ver\xE3o, naturalmente."
 
-# Campaign-specific disclaimer override. When set, wins over the brand's
-# legal.default_disclaimer / legal.required_disclaimers. Use this for
-# campaign-specific copy ("Sale ends 12/31", "While supplies last");
-# leave it unset to keep the brand's compliance boilerplate. Both fields
-# are optional.
-#
-# Example:
-#   disclaimer_text: "Promotion ends August 31, 2025."
+# THIS is the knob that controls how many languages render per market.
+# Add/remove entries to change the on-screen language set.
+output_locales:
+- en
+- es
+- pt
+
+# Campaign-specific disclaimer override (per-locale). Falls back to brand
+# legal copy when a locale entry is missing here. Example for a campaign-
+# specific promo override:
 #   disclaimer_text_localized:
-#     MX: "Promoción válida hasta el 31 de agosto de 2025."
-#     BR: "Promoção válida até 31 de agosto de 2025."
-#     CO: "Promoción válida hasta el 31 de agosto de 2025."
+#     en: "Promotion ends August 31, 2025."
+#     es: "Promoción válida hasta el 31 de agosto de 2025."
 disclaimer_text: null
-disclaimer_text_localized: {}
+disclaimer_text_localized:
+  en: Terms and conditions apply.
+  es: "Aplican t\xE9rminos y condiciones."
+  pt: "Consulte os termos e condi\xE7\xF5es."
 products:
 - id: aquavita_sparkling
   name: AquaVita Sparkling Water

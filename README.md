@@ -1,27 +1,10 @@
 # Creative Automation Pipeline
 
-A multi-agent ADK pipeline that turns a YAML campaign brief into brand-compliant social ad creatives across three aspect ratios, two products, and three locales — with brand/legal compliance checks and a structured run report.
+A multi-agent ADK pipeline that turns a YAML campaign brief into brand-compliant social ad creatives across three aspect ratios, two products, and three rendered language variants — with brand/legal compliance checks and a structured run report. The default brief produces 18 final creatives (2 products × 3 aspect ratios × 1 distribution market × 3 output locales: English, Spanish, Portuguese). One source hero is generated per product and shared across every locale variant; localization happens on the rendered text overlay (headline + disclaimer), not on the imagery.
 
 ## What this is
 
 A global consumer-goods brand launches hundreds of localized social campaigns per month. Manual creative production is slow, expensive, and inconsistent. This proof-of-concept demonstrates a working pipeline that ingests a campaign brief + brand guidelines, reuses cached hero images when available, generates new ones via GenAI when missing, composes them into 1:1 / 9:16 / 16:9 creatives with localized text overlays + market-specific disclaimers, runs deterministic brand and legal compliance checks, and emits a structured JSON report — all locally, all behind a swappable LLM and image-gen provider matrix.
-
-
-## Assignment Requirement Coverage
-
-| Requirement | Status |
-|---|---|
-| Accepts campaign brief | Yes — YAML campaign brief |
-| Supports at least two products | Yes — AquaVita and SunGuard |
-| Uses or generates assets | Yes — cached or generated hero assets |
-| Creates at least three aspect ratios | Yes — 1x1, 9x16, 16x9 |
-| Displays campaign message | Yes — localized campaign headline rendered on output |
-| Saves outputs by product/aspect ratio | Yes — outputs/{product}/{ratio}/ |
-| Documentation | Yes — README |
-| Demo video | To be recorded |
-| Nice-to-have: brand/legal checks | Yes |
-| Nice-to-have: logging/reporting | Yes — JSON report |
-| Extra: QC contrast check | Yes — final-render WCAG-style contrast QC |
 
 
 ## Quick Start
@@ -56,14 +39,27 @@ The full demo is one command. It reads the default brief + brand guidelines, gen
 What happens:
 - Reads `inputs/brand/guidelines.yaml` and `inputs/campaign_briefs/summer_refresh_2025.yaml`.
 - Runs the agent graph (asset cache check → image gen → composition → brand / legal / QC checks → reporter → Dropbox uploader).
-- Writes per-product PNGs under `outputs/{product_id}/{ratio}/{market}_{locale}.png` and the run report at `outputs/report_<ts>.json`.
+- Writes per-product PNGs under `outputs/{product_id}/{ratio}/{market}_{locale}.png`.
+- Writes the run report as a paired set: `outputs/report_<ts>.json` (full audit) and `outputs/report_<ts>.md` (concise reviewer-facing summary). See [§ Reports](#reports).
+- Refreshes `outputs/latest_report.json` and `outputs/latest_report.md` so you can `open outputs/latest_report.md` regardless of timestamp.
 - Snapshots the finished `outputs/` tree to Dropbox.
-- Prints two summary lines at the end:
+- Prints a compact summary at the end:
 
 ```
-REPORT: outputs/report_20260507T184413Z.json
-DROPBOX_UPLOAD: enabled=true folder=/runs/summer_refresh_2025/20260507T184413Z files=23 failures=0
-DROPBOX_MANIFEST: outputs/dropbox_upload_20260507T184413Z.json
+Run complete.
+Report JSON:     outputs/report_20260507T184413Z.json
+Report Markdown: outputs/report_20260507T184413Z.md
+Latest copies:   outputs/latest_report.json, outputs/latest_report.md
+Dropbox:         uploaded 23 files to /runs/summer_refresh_2025/20260507T184413Z (failures=0)
+
+Overall:
+  Brand: warn
+  Legal: pass
+  QC:    pass
+
+Products:
+  - aquavita_sparkling: 9 outputs, QC pass
+  - sunguard_spf50: 9 outputs, QC pass
 ```
 
 In your Dropbox the run lands at:
@@ -78,7 +74,17 @@ The first run hits the image-gen API (~30-90 s per hero). Subsequent runs reuse 
 
 ### Fresh run / force new hero images
 
-When you want to demo *fresh* image generation rather than re-rendering against cached heroes — e.g. before a stakeholder demo, or after changing the brief / brand prompt — clear the local artifact caches first:
+When you want to demo *fresh* image generation rather than re-rendering against cached heroes — e.g. before a stakeholder demo, or after changing the brief / brand prompt — clear the local artifact caches first.
+
+**Shortcut form** (uses the built-in CLI flag):
+
+```bash
+.venv/bin/python scripts/run_pipeline.py --clean-outputs
+```
+
+`--clean-outputs` removes everything under `outputs/` (preserving `.gitkeep`) before the run, equivalent to `rm -rf outputs/* && touch outputs/.gitkeep`.
+
+**Long form** (explicit, also clears the ADK artifact cache):
 
 ```bash
 cd ~/Code/TD-Creative-Pipeline-POC
@@ -96,6 +102,14 @@ grep -n "force_generate_hero\|regenerate_cached_assets" inputs/campaign_briefs/s
 # Now run normally — image gen will fire because both flags are true.
 .venv/bin/python scripts/run_pipeline.py
 ```
+
+**Optional retention** — keep only the newest N report pairs:
+
+```bash
+.venv/bin/python scripts/run_pipeline.py --keep-reports 5
+```
+
+After the run, prunes older `report_*.json/.md` pairs and matching `dropbox_upload_*.json` manifests so only the newest 5 timestamps remain. The `latest_report.{json,md}` convenience copies are never touched. Default behavior (no flag): keep everything.
 
 Why each step:
 - `rm -rf outputs/*` removes prior renders, source heroes, sidecar JSON, and any stale Dropbox upload manifests.
@@ -129,12 +143,60 @@ DROPBOX_UPLOAD_PARALLELISM=8
 
 Other providers (Google / Anthropic) are configured in [§ Provider Swap](#provider-swap).
 
-### Run modes
+### Swapping Brand Guidelines and Campaign Briefs
+
+Explain:
+
+## Current demo inputs
+
+Current brand rules:
+
+inputs/brand/guidelines.yaml
+
+This controls:
+- brand name/id
+- color palette
+- logo path and logo placement
+- typography
+- layout templates
+- aspect-ratio rules
+- text sizing rules
+- legal fallback copy
+- required brand checks
+- QC thresholds
+- composition rules
+
+Current campaign brief:
+
+inputs/campaign_briefs/summer_refresh_2025.yaml
+
+This controls:
+- campaign id/name
+- language
+- localization settings
+- markets
+- target audience
+- campaign message
+- creative quality
+- layout template
+- force_generate_hero / regenerate_cached_assets
+- products
+- product descriptions
+- prompt_keywords
+- prompt_avoid
+- campaign-specific disclaimer overrides
+
+How to:
+- To create a new campaign today, edit or copy the campaign brief YAML.
+- To create a new brand today, edit or copy the brand guidelines YAML.
+- The pipeline reads those files at runtime.
+- No Python changes are required for normal campaign/brand changes.
+
+
+### More Run modes
 
 | Mode | Command | Use |
-|---|---|---|
-| **Standard demo run** | `.venv/bin/python scripts/run_pipeline.py` | **Recommended path.** Runs pipeline, writes `outputs/`, uploads to Dropbox when enabled in `.env`. |
-| **Fresh image-generation run** | `rm -rf outputs/* && touch outputs/.gitkeep && rm -rf .adk/artifacts/* && .venv/bin/python scripts/run_pipeline.py` | Use when you want brand-new hero images instead of cached/re-rendered outputs. See § *Fresh run / force new hero images* above for the verify-YAML step. |
+
 | **ADK Web** (advanced/debug) | `uv run adk web .` | Visual ADK orchestration in a browser. Use when debugging the multi-agent flow or doing a live walkthrough. **Not the recommended demo path.** See [§ Advanced / Debugging](#advanced--debugging). |
 | **ADK interactive terminal** (advanced) | `uv run adk run creative_pipeline` | Same orchestration as ADK Web, terminal output. |
 
@@ -215,24 +277,26 @@ legal:
 ```yaml
 campaign_id: "summer_refresh_2025"
 brand_id: "aquacorp_global"
-language: en                  # primary language tag — directive (see § Language)
-localized_copy: false         # toggle: per-market fan-out across locales
-localized_legal_copy: false   # toggle: per-market legal text
-markets: ["MX", "BR", "CO"]
+language: en                  # base/fallback language + image-gen prompt cue
+localized_copy: true          # use campaign_message_localized[locale] per output
+localized_legal_copy: true    # use disclaimer_text_localized[locale] per output
+markets: ["US"]               # DISTRIBUTION market(s) — kept separate from language
+output_locales: ["en", "es", "pt"]   # explicit language variants to render per market
 target_audience: "Health-conscious adults 25-40"
 
-# Single-language headline (used when localized_copy=false). Localized
-# entries are consulted automatically when ``language`` matches a key.
 campaign_message: "Refresh your summer, naturally."
 campaign_message_localized:
   en: "Refresh your summer, naturally."
   es: "Refresca tu verano, naturalmente."
   pt: "Renove seu verão, naturalmente."
 
-# Optional campaign-specific disclaimer override; falls back to brand
-# legal when unset. See § Language and localization.
+# Per-locale disclaimer override (used when localized_legal_copy=true).
+# Falls back through brand fallbacks when a locale is missing here.
 disclaimer_text: null
-disclaimer_text_localized: {}
+disclaimer_text_localized:
+  en: "Terms and conditions apply."
+  es: "Aplican términos y condiciones."
+  pt: "Consulte os termos e condições."
 
 products:
   - id: aquavita_sparkling
@@ -247,68 +311,105 @@ products:
 
 ### Language and localization
 
-The brief has two orthogonal switches that together drive all language behavior:
+> **All language behavior is configured in the brief:** [inputs/campaign_briefs/summer_refresh_2025.yaml](inputs/campaign_briefs/summer_refresh_2025.yaml). Edit that file, save, re-run. The brief's header block summarizes the same model as this section.
 
-| Flag | Type | Effect |
-|---|---|---|
-| `language` | locale code (`en`, `es`, `pt`, `fr`, …) | Primary language directive. When ``localized_copy=false``, picks the entry from ``campaign_message_localized`` whose key matches; falls back to ``campaign_message`` if no match. Also drives the locale tag in output filenames (`MX_es.png`) and adds a language-aware audience clause to the image-gen prompt. |
-| `localized_copy` | bool | When `true`, the composer fans out per market using `brand.market_locales` to pick each market's locale and pull the headline from `campaign_message_localized[locale]`. When `false`, every market renders the single primary language. |
+**Three knobs, three jobs.** Distribution market and rendered language are
+two separate axes — that decoupling is the contract that prevents both the
+"all outputs are English" surprise and the "I got 54 files instead of 18"
+surprise.
 
-Three common patterns:
+| Field | Job | Effect on output | Demo value |
+|---|---|---|---|
+| [`markets`](inputs/campaign_briefs/summer_refresh_2025.yaml) | **Distribution market(s).** Where the campaign ships. | Filename prefix (`US_*.png`). | `[US]` |
+| [`output_locales`](inputs/campaign_briefs/summer_refresh_2025.yaml) | **Rendered language variants.** Which languages render per market. | Filename suffix (`*_en.png`, `*_es.png`, `*_pt.png`). | `[en, es, pt]` |
+| [`language`](inputs/campaign_briefs/summer_refresh_2025.yaml) | **Image-gen prompt cue + fallback.** Tags the Imagen prompt for the source hero (one per product, shared across all locale variants); also the fallback if a locale entry is missing from the localized maps. | None on text overlay; only on the underlying hero photography's mood/style cue. | `en` |
+| [`localized_copy`](inputs/campaign_briefs/summer_refresh_2025.yaml) | When `true`, headlines come from `campaign_message_localized[locale]` per output. When `false`, every output uses the single `campaign_message`. | Headline text per output. | `true` |
+| [`localized_legal_copy`](inputs/campaign_briefs/summer_refresh_2025.yaml) | When `true`, disclaimers walk a localized chain (`disclaimer_text_localized[locale]` → brand fallbacks) per output. When `false`, every output uses `brand.legal.default_disclaimer`. | Disclaimer text per output. | `true` |
+
+`target_region` is a related but **prompt-only** cue — it labels the hero's
+cultural feel ("Region: LATAM") inside the image-gen prompt and does not
+control market or locale fan-out.
+
+**Output count = `products × ratios × markets × output_locales`.**
+Demo brief: `2 × 3 × 1 × 3 = 18 final creatives`.
+
+#### Common edits
+
+All examples are diffs against the current demo brief.
 
 ```yaml
-# 1. Single-language English campaign — most briefs land here.
-language: en
-localized_copy: false
-campaign_message: "Refresh your summer, naturally."
-# campaign_message_localized.en wins automatically; en/es/pt entries
-# below are kept as a translation library that becomes active if you
-# flip language or localized_copy later.
-
-# 2. Single-language Spanish campaign — flip ONE field.
-language: es
-localized_copy: false
-# Composer auto-pulls campaign_message_localized["es"] for every market,
-# so you don't rewrite campaign_message. The image-gen prompt also
-# gains a "Spanish-speaking audience (LATAM / Iberian context)" cue.
-
-# 3. Multi-locale fan-out — Spanish in MX/CO, Portuguese in BR.
-language: en
-localized_copy: true
-campaign_message_localized:
-  en: "Refresh your summer, naturally."
-  es: "Refresca tu verano, naturalmente."
-  pt: "Renove seu verão, naturalmente."
-# Output filenames: MX_es.png, BR_pt.png, CO_es.png.
+# Drop Portuguese — render only English + Spanish (12 creatives).
+output_locales:
+  - en
+  - es
+# (Keep the `pt` entries in campaign_message_localized / disclaimer_text_localized
+# as a translation library — they're harmless when not referenced.)
 ```
 
+```yaml
+# Add a second distribution market — every locale renders for both markets
+# (36 creatives: US_en/es/pt + CA_en/es/pt × 3 ratios × 2 products).
+markets:
+  - US
+  - CA
+```
+
+```yaml
+# Single-language English campaign — simplest path (6 creatives).
+markets: ["US"]
+output_locales: null            # or omit the field entirely
+localized_copy: false
+```
+
+```yaml
+# Per-market locale resolution (legacy mode) — Spanish in MX/CO, Portuguese
+# in BR, driven by brand.market_locales instead of an explicit locale list.
+markets: ["MX", "BR", "CO"]
+output_locales: null            # absent = fall back to brand.market_locales
+localized_copy: true
+# Filenames: MX_es.png, BR_pt.png, CO_es.png. = 18 creatives at default 3 × 2.
+```
+
+**Per-locale hero generation is intentionally not implemented.** One source
+hero per product is shared across every configured locale variant — the
+headline + disclaimer overlay does the language work, and the hero
+photography (a product on a backdrop) is generic enough to work across
+languages. Generating one hero per locale would multiply Imagen API cost
+by `len(output_locales)`.
+
 **Disclaimer text** follows the same brief-first principle. Set
-`disclaimer_text` (or `disclaimer_text_localized` for per-market variants)
-on the brief to ship campaign-specific legal copy — "Promotion ends August
-31, 2025." or similar. When both are unset, the composer falls back to
-`brand.legal.default_disclaimer` / `brand.legal.required_disclaimers`,
+`disclaimer_text` (single-language override) or `disclaimer_text_localized`
+(per-locale override) for campaign-specific legal copy — "Promotion ends
+August 31, 2025." or similar. When both are unset, the composer falls back
+to `brand.legal.default_disclaimer` / `brand.legal.required_disclaimers`,
 keeping compliance boilerplate as the safety net. Resolution order is
-brief-localized → brief-default → brand-localized → brand-default. Both
+brief-localized → brief-default → brand-localized → brand-default. All
 fields are validated by the schema in [creative_pipeline/schemas.py](creative_pipeline/schemas.py).
 
 ## Example Output
 
-After a run, [outputs/](outputs/) is organized by product and aspect ratio:
+After a run, [outputs/](outputs/) is organized by product and aspect ratio. With the default brief (2 products × 3 aspect ratios × 1 distribution market × 3 output locales), this is **18 final creatives** — one per locale variant, all rendered against the same source hero per product:
 
 ```
 outputs/
 ├── aquavita_sparkling/
-│   ├── 1x1/  MX_es.png  BR_pt.png  CO_es.png
-│   ├── 9x16/ MX_es.png  BR_pt.png  CO_es.png
-│   └── 16x9/ MX_es.png  BR_pt.png  CO_es.png
+│   ├── 1x1/  US_en.png  US_es.png  US_pt.png
+│   ├── 9x16/ US_en.png  US_es.png  US_pt.png
+│   └── 16x9/ US_en.png  US_es.png  US_pt.png
 ├── sunguard_spf50/
-│   ├── 1x1/  MX_es.png  BR_pt.png  CO_es.png
-│   ├── 9x16/ MX_es.png  BR_pt.png  CO_es.png
-│   └── 16x9/ MX_es.png  BR_pt.png  CO_es.png
-└── report_20260506T213655Z.json
+│   ├── 1x1/  US_en.png  US_es.png  US_pt.png
+│   ├── 9x16/ US_en.png  US_es.png  US_pt.png
+│   └── 16x9/ US_en.png  US_es.png  US_pt.png
+├── report_20260506T213655Z.json    # full machine-readable audit (verbose)
+├── report_20260506T213655Z.md      # concise human-readable summary (recommended for review)
+├── latest_report.json              # convenience copy of the newest run
+├── latest_report.md
+└── dropbox_upload_20260506T213655Z.json   # upload manifest (only when DROPBOX_UPLOAD_ENABLED=true)
 ```
 
-A sample creative — `outputs/sunguard_spf50/1x1/MX_es.png` — shows the Spanish headline "Refresca tu verano, naturalmente." with the Mexico disclaimer "Aplican términos y condiciones." and the brand logo stamped in the top-right with the configured 8% safe-zone margin.
+Each `US_*.png` triplet shares the same hero imagery (one Imagen call per product) and differs only in the rendered headline + disclaimer overlay. To add Canada or Mexico as a *distribution market*, append to `markets:` in the brief — every output locale will then render against that market too (`MX_en.png`, `MX_es.png`, `MX_pt.png`, etc.). To swap which *languages* render per market, edit `output_locales`. See [§ Language and localization](#language-and-localization).
+
+A sample creative — `outputs/sunguard_spf50/1x1/US_es.png` — shows the Spanish headline "Refresca tu verano, naturalmente." with the Spanish disclaimer "Aplican términos y condiciones." and the brand logo stamped in the top-right with the configured 8% safe-zone margin.
 
 `report_*.json` excerpt:
 
@@ -324,8 +425,8 @@ A sample creative — `outputs/sunguard_spf50/1x1/MX_es.png` — shows the Spani
       "image_model": null,
       "image_gen_latency_ms": null,
       "outputs": [
-        {"market": "MX", "locale": "es", "ratio": "1x1",
-         "path": "outputs/aquavita_sparkling/1x1/MX_es.png",
+        {"market": "US", "locale": "es", "ratio": "1x1",
+         "path": "outputs/aquavita_sparkling/1x1/US_es.png",
          "brand_check": "pass", "legal_check": "pass"}
       ],
       "brand_check_summary": "pass",
@@ -334,6 +435,69 @@ A sample creative — `outputs/sunguard_spf50/1x1/MX_es.png` — shows the Spani
   ]
 }
 ```
+
+## Reports
+
+Every run produces a **paired report** so machines and humans each have the right view:
+
+| File | Audience | Purpose |
+|---|---|---|
+| `outputs/report_<ts>.json` | Machines / debugging | Full audit trail. Every score, every candidate the composer evaluated, every shift attempted, every QC rule's full result. Intentionally verbose (~10k+ lines on a typical run); not designed for human reading. |
+| `outputs/report_<ts>.md` | Humans / review | Concise summary. Run metadata, overall pass/warn/fail, per-product output table, the per-output fields a reviewer actually scans (headline size, color, composition score, contrast / WCAG, logo position, disclaimer position). The verbose internals are *intentionally* omitted; if you need them, open the JSON. **Recommended starting point for reviewers.** |
+| `outputs/latest_report.json` | Either | Convenience copy of the newest run's JSON, refreshed each run. Lets `open outputs/latest_report.md` work regardless of timestamp. |
+| `outputs/latest_report.md` | Either | Same for the Markdown. |
+| `outputs/dropbox_upload_<ts>.json` | Machines | Upload manifest (only when `DROPBOX_UPLOAD_ENABLED=true`). Lists every uploaded file's local + Dropbox path, any per-file failures, and shared links if requested. |
+
+### Quick-open the latest run
+
+```bash
+open outputs/latest_report.md
+```
+
+(macOS opens it in your default Markdown viewer; on Linux, `xdg-open` or pipe through `glow`.)
+
+### How the JSON and Markdown stay in sync
+
+The Markdown is **rendered from the same in-memory dict** that becomes the JSON — they can't drift apart. The reporter writes them as a pair (`_write_report_pair` in [creative_pipeline/sub_agents/reporter/agent.py](creative_pipeline/sub_agents/reporter/agent.py)). When `DROPBOX_UPLOAD_ENABLED=true`, the `DropboxUploaderAgent` regenerates the Markdown after upload completes so the "Dropbox upload" line in the summary reflects the actual result (`uploaded N files → /path/`) instead of the placeholder "configured (pending upload)".
+
+### Markdown report structure
+
+The Markdown follows this skeleton (real example shipped in `outputs/latest_report.md`):
+
+```
+# Creative Pipeline Run Report
+
+## Run Summary               — campaign / language / providers / Dropbox status
+
+## Overall Status            — Brand / Legal / QC / Dropbox table
+
+## Products                  — one section per product
+### `aquavita_sparkling`
+  - source origin, image provider/model, used cache, summary statuses, warnings
+  - per-output table: market | ratio | output | brand | legal | QC | WCAG levels | composition score
+### `sunguard_spf50`
+  - same shape
+
+## Composition Notes         — per-output: headline size/color/box/prominence,
+                                logo position, disclaimer position/contrast,
+                                composition score and warnings only
+
+## Failures and Warnings     — every brand/legal/QC/composition warning surfaced;
+                                "No blocking failures." when clean
+
+## Files                     — JSON path, Markdown path, latest copies, manifest
+```
+
+Verbose internals (every box scored, every shift attempted, full QC rule responses) are **deliberately omitted** from the Markdown. If you need them, the JSON has every field for the same run.
+
+### Retention
+
+`outputs/` accumulates files. Two flags on `scripts/run_pipeline.py` keep the directory tidy:
+
+- `--clean-outputs` — delete everything under `outputs/` (preserving `.gitkeep`) **before** the run. Use when you want a fresh image-generation demo.
+- `--keep-reports N` — **after** the run, prune older `report_*.json/.md` pairs and matching `dropbox_upload_*.json` manifests so only the newest N timestamps remain. Default: keep everything. The `latest_report.{json,md}` convenience copies are never touched.
+
+Combined: `.venv/bin/python scripts/run_pipeline.py --clean-outputs --keep-reports 5` gives you a fresh-from-scratch run with retention going forward.
 
 ## Quality Gates: Brand, Legal, and QC Checks
 
@@ -531,7 +695,7 @@ The actual on-disk location in your Dropbox depends on whether your app is App F
         └── 20260507T172946Z/                   ← from <run_timestamp>
             ├── report_20260507T172946Z.json
             ├── aquavita_sparkling/
-            │   ├── 1x1/MX_es.png  9x16/MX_es.png  16x9/MX_es.png  ...
+            │   ├── 1x1/US_en.png  US_es.png  US_pt.png  9x16/...  16x9/...
             │   └── source/global_*.png   global_*.json
             └── sunguard_spf50/
                 └── ...
@@ -687,3 +851,19 @@ Recorded against `adk web`; covers cold-start image generation, cache reuse on r
 - **The SunGuard AA-large nuance.** Navy headline on tan beach-towel background scored 3.24:1. Rather than silently passing or hard-failing, the system surfaced `wcag_level: "AA-large"` so a reviewer can see exactly what they are accepting. A brand that wants stricter copy bumps `min_contrast_ratio` or sets `halt_on_qc_failure: true` — no code change.
 - **Modular future QC rules.** `tools/qc_rules.py:build_rules(brand)` builds the active rule list from brand flags. Adding a new rule (minimum font size, focal-area collision, brand-color saturation in headline region, etc.) is a new `QCRule` subclass plus a flag in `RequiredBrandChecks` — `QCCheckerAgent` already iterates whatever `build_rules` returns.
 - **Optional Dropbox snapshot — local outputs always win.** `scripts/run_pipeline.py --upload-dropbox` mirrors the run's `outputs/` to `/TD-Creative-Pipeline-POC/<campaign_id>/<run_timestamp>/` after the pipeline finishes. The Dropbox SDK is an opt-in `[upload]` extra so default installs stay slim; the access token is read from `.env`, never logged, never echoed in metadata, and the upload runs **after** the pipeline so a Dropbox outage can't fail a local run. A `dropbox_upload_<ts>.json` manifest lands next to `report_<ts>.json` listing every uploaded file and any per-file failures, plus optional shared links when `--dropbox-shared-links` is passed. See § *Optional Dropbox Upload*.
+
+## Assignment Requirement Coverage
+
+| Requirement | Status |
+|---|---|
+| Accepts campaign brief | Yes — YAML campaign brief |
+| Supports at least two products | Yes — AquaVita and SunGuard |
+| Uses or generates assets | Yes — cached or generated hero assets |
+| Creates at least three aspect ratios | Yes — 1x1, 9x16, 16x9 |
+| Displays campaign message | Yes — localized campaign headline rendered on output |
+| Saves outputs by product/aspect ratio | Yes — outputs/{product}/{ratio}/ |
+| Documentation | Yes — README |
+| Demo video | To be recorded |
+| Nice-to-have: brand/legal checks | Yes |
+| Nice-to-have: logging/reporting | Yes — JSON report |
+| Extra: QC contrast check | Yes — final-render WCAG-style contrast QC |

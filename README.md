@@ -751,6 +751,8 @@ The token never appears in logs, the manifest, or any returned metadata.
 
 ## Architecture
 
+The pipeline is built on Google's **Agent Development Kit (ADK)**. ADK is the right tool here because the problem isn't really an LLM problem — it's an **orchestration** problem. Generating one creative is a single API call; generating localized creatives across products, markets, and aspect ratios while keeping brand and legal compliance enforced is a workflow with branching, fan-out, validation gates, and shared state. ADK provides first-class primitives for exactly that — `SequentialAgent`, `ParallelAgent`, session state, and lifecycle callbacks — so the structure of the pipeline lives in the agent topology rather than buried in custom Python plumbing.
+
 ```
 root_agent (SequentialAgent)
   ├── BrandLoaderAgent          loads guidelines.yaml → state["brand"]
@@ -769,6 +771,27 @@ root_agent (SequentialAgent)
                                  (no-op when DROPBOX_UPLOAD_ENABLED unset;
                                  never raises — failures land in state instead)
 ```
+
+**Two ideas are doing most of the work.**
+
+**1. Setup → fan-out → fan-in.** Brand guidelines and the campaign brief are standing inputs that load *once* and then feed every downstream branch. Once they're in session state, the `ParallelAgent` fans out one sub-pipeline per product — those run concurrently because nothing about generating product A's creatives depends on product B's. `ReportingAgent` fans the results back in at the end. This is what lets the system scale toward "hundreds of campaigns per month" without rewriting the core: more products is a wider fan-out, not new code.
+
+**2. Each sub-pipeline is itself a `SequentialAgent` of single-responsibility agents.** The per-product flow reads top-to-bottom like a spec — `cache check → generate (if needed) → compose → brand check → legal check → QC check`. Every agent does one thing, reads from session state, and writes back to it. The `AssetManagerAgent` is the only thing that knows where assets live on disk; the `ImageGeneratorAgent` is the only thing that knows about Imagen / gpt-image-1; the `CreativeComposerAgent` is the only thing that knows about Pillow. Replacing the image provider is a one-agent change, not a refactor.
+
+### Architectural choices worth calling out
+
+- **Mixed LLM and deterministic agents.** `CreativeComposerAgent`, `BrandCheckerAgent`, and `QCCheckerAgent` don't call an LLM — they're function-based ADK agents wrapping Pillow / OpenCV / WCAG math. ADK doesn't *require* every node to be an LLM, and using a model for deterministic image work would be slower, more expensive, and less reliable. The LLM shows up where it earns its keep (image generation), and rule-based code shows up where it's better.
+- **Compliance is structural, not advisory.** `LegalCheckerAgent` runs in two places: as a `before_model_callback` *before* image generation is ever called (so a prohibited word in the brief halts the run before any spend), and again *after* composition (to verify the per-market disclaimer was actually rendered). Brand checks (palette distance, logo placement) and QC contrast checks run post-composition, on the rendered artifact. The pipeline can't produce an output that bypassed the checks because the checks are nodes in the graph, not a linter run on the side.
+- **Session state as the integration contract.** Every agent reads and writes to a single shared state object — the brief, the brand guidelines, per-product outputs, check results, latencies. That's what makes `ReportingAgent` trivial: it just walks state and serializes. It's also what isolates the parallel branches — each writes to its own `state["product:{pid}"]` slot, no cross-branch contention.
+- **Provider-agnostic by construction.** The agent LLM is wired through **LiteLLM**, so the same agent code drives Google, OpenAI, or Anthropic without per-provider branches. The image-gen backend is decoupled from the agent LLM (`PROVIDER` and `IMAGE_PROVIDER` are independent env vars), so you can run a Gemini-driven agent that calls `gpt-image-1` for hero generation, or vice versa. This decoupling is the contract that prevents vendor lock-in for a real client.
+- **Idempotency by design.** Generated heroes are written back into the input asset directory, so the second run is a cache hit. "Reuse when available" is honored by making generated assets indistinguishable from supplied ones on the next run.
+
+### What this architecture buys
+
+- **Scale** — adding a product is one YAML entry; adding a market or locale is a string in a map; the agent code doesn't change.
+- **Substitutability** — any single agent can be swapped (image model, storage backend, compliance ruleset) without touching the others, because session state is the only contract between them.
+- **Visibility** — the ADK trace makes the run inspectable in `adk web`: parallel branches stream live, every state delta is visible, debugging is reading the trace rather than grepping logs.
+- **Safety** — compliance gates are graph nodes, not optional middleware, so there's no "we forgot to run the legal check" failure mode.
 
 ## Key Design Decisions
 

@@ -6,6 +6,30 @@ A multi-agent ADK pipeline that turns a YAML campaign brief into brand-compliant
 
 A global consumer-goods brand launches hundreds of localized social campaigns per month. Manual creative production is slow, expensive, and inconsistent. This proof-of-concept demonstrates a working pipeline that ingests a campaign brief + brand guidelines, reuses cached hero images when available, generates new ones via GenAI when missing, composes them into 1:1 / 9:16 / 16:9 creatives with localized text overlays + market-specific disclaimers, runs deterministic brand and legal compliance checks, and emits a structured JSON report — all locally, all behind a swappable LLM and image-gen provider matrix.
 
+## Future Roadmap
+While the current implementation primarily focuses on the core multi-agent orchestration pipeline and creative composition logic, future development is planned across several enterprise-focused areas required for production deployment. These enhancements include:
+
+Security Enhancements
+Role-Based Access Control (RBAC), Multi-Factor Authentication (MFA), encryption of data at rest and in transit, API security, audit logging, and enterprise compliance planning.
+→ /future-roadmap/security-roadmap.md
+
+Scalability Enhancements
+Stateless deployment architecture, multiple app instances, load balancing, queue-based processing, and rollback/fallback deployment strategies.
+→ /future-roadmap/scalability-roadmap.md
+
+Observability Enhancements
+Real-time dashboards, JSON and markdown audit integration, monitoring, alerting, logging, tracing, and automated operational notifications.
+→ /future-roadmap/observability-roadmap.md
+
+Computer Vision Enhancements
+AI-assisted composition analysis, object detection, intelligent layout guidance, automated quality control, and brand compliance validation.
+→ /future-roadmap/computer-vision-roadmap.md
+
+User Interface Enhancements
+Streamlit or React-based interfaces for non-technical users, asset upload workflows, campaign configuration forms, and potential Adobe API integrations for automated image preprocessing and creative operations.
+→ /future-roadmap/ui-roadmap.md
+
+These roadmap items represent planned future development intended to evolve the current proof-of-concept system into a scalable, secure, observable, and production-ready enterprise creative workflow platform.
 
 ## Quick Start
 

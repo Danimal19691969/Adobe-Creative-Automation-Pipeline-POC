@@ -112,7 +112,7 @@ products:
   - clean left-side or lower-left negative space for copy overlay
   - high-end social campaign style
 
-prompt_avoid:
+  prompt_avoid:
   - embedded text or words in the image
   - tiny fake label text
   - flat placeholder mockup

@@ -22,8 +22,8 @@ localized_copy: true
 # true = render disclaimers from disclaimer_text_localized[locale] per output.
 localized_legal_copy: true
 
-force_generate_hero: true
-regenerate_cached_assets: true
+force_generate_hero: false
+regenerate_cached_assets: false
 halt_on_qc_failure: false
 
 # Region cue injected into the image-gen prompt (cultural feel of the hero).
@@ -37,6 +37,8 @@ markets:
 
 target_audience: Health-conscious adults 25-40
 creative_quality: demo_polished
+
+# SWAP COMPOSITION DESIGN HERE: 
 layout_template: premium_product_hero
 brand_palette_influence: medium
 generation_palette_hint: cyan, deep navy, clean white, fresh water tones, bright summer
@@ -74,52 +76,81 @@ products:
   category: beverage
   description: Lightly carbonated mineral water with natural fruit essence
   prompt_keywords:
-  - premium sparkling water product photography
-  - realistic glass bottle hero with light condensation
-  - bottle positioned in the right third of the frame, fully visible and not cropped
-  - left third of the frame reserved as clean copy-safe negative space
-  - simple soft turquoise pool water, calm sky, or pale stone as the left-side backdrop
-  - smooth low-detail surfaces behind the copy area, softly out of focus
-  - garnish (mint, cucumber, lime) only allowed near the product base on the right side, never in the left third
-  - sunlit modern poolside terrace with pale stone surface
-  - crisp morning light with fresh spa-like atmosphere
-  - shallow depth of field with the copy area gently blurred
-  - high-end wellness and resort lifestyle campaign style
+    - premium sparkling water product photography
+    - realistic glass bottle hero with light condensation
+    - bottle positioned in the right third of the frame, fully visible and not cropped
+    - left third of the frame reserved as clean copy-safe negative space
+    - simple soft turquoise pool water, calm sky, or pale stone as the left-side backdrop
+    - smooth low-detail surfaces behind the copy area, softly out of focus
+    - garnish (mint, cucumber, lime) only allowed near the product base on the right side, never in the left third
+    - sunlit modern poolside terrace with pale stone surface
+    - crisp morning light with fresh spa-like atmosphere
+    - shallow depth of field with the copy area gently blurred
+    - high-end wellness and resort lifestyle campaign style
   prompt_avoid:
-  - embedded text or words in the image
-  - tiny fake label text
-  - flat placeholder mockup
-  - stock-photo cliche
-  - garnish, mint, cucumber, lime, fruit slices, bubbles, droplets, or props on the left side of the frame
-  - busy patterns, foliage, reflections, ripples, or high-contrast objects in the left third
-  - hands, arms, faces, or bodies near the copy area
-  - bottle cropped, tilted out of frame, or pushed to the center
-  - cluttered tabletop scenes
-  - multiple bottles or stacked products
-  - sharp horizon lines or strong gradients cutting through the left third
+    - embedded text or words in the image
+    - tiny fake label text
+    - flat placeholder mockup
+    - stock-photo cliche
+    - garnish, mint, cucumber, lime, fruit slices, bubbles, droplets, or props on the left side of the frame
+    - busy patterns, foliage, reflections, ripples, or high-contrast objects in the left third
+    - hands, arms, faces, or bodies near the copy area
+    - bottle cropped, tilted out of frame, or pushed to the center
+    - cluttered tabletop scenes
+    - multiple bottles or stacked products
+    - sharp horizon lines or strong gradients cutting through the left third
+
 - id: sunguard_spf50
   name: SunGuard SPF 50 Lotion
   category: skincare
   description: Reef-safe broad-spectrum sunscreen for active outdoor use
   prompt_keywords:
-  - premium sunscreen and skincare product photography
-  - realistic SPF 50 white pump bottle hero with clean highlights
-  - beach towel, sunlight, sand, and skincare lifestyle scene
-  - soft ocean background with warm summer beach atmosphere
-  - bright natural sunlight with gentle shadows and reflections
-  - shallow depth of field with product clearly in focus
-  - product positioned center-right with clean silhouette
-  - clean left-side or lower-left negative space for copy overlay
-  - high-end social campaign style
+    - premium sunscreen and skincare product photography
+    - realistic SPF 50 white pump bottle hero with clean highlights
+    - beach towel, sunlight, sand, and skincare lifestyle scene
+    - soft ocean background with warm summer beach atmosphere
+    - bright natural sunlight with gentle shadows and reflections
+    - shallow depth of field with product clearly in focus
+    - product positioned center-right with clean silhouette
+    - clean left-side or lower-left negative space for copy overlay
+    - high-end social campaign style
 
   prompt_avoid:
-  - embedded text or words in the image
-  - tiny fake label text
-  - flat placeholder mockup
-  - stock-photo cliché
-  - busy patterns behind the copy area
-  - cluttered beach props
-  - hands holding the product
-  - crowded beach scene
-  - harsh yellow color cast
-  - medical or clinical product styling
+    - embedded text or words in the image
+    - tiny fake label text
+    - flat placeholder mockup
+    - stock-photo cliché
+    - busy patterns behind the copy area
+    - cluttered beach props
+    - hands holding the product
+    - crowded beach scene
+    - harsh yellow color cast
+    - medical or clinical product styling
+
+
+- id: emberglow_candle
+  name: "EmberGlow Coastal Candle"
+  category: home_fragrance
+  description: "Hand-poured soy candle with driftwood, sea salt, and citrus notes inspired by summer evenings on the coast"
+  prompt_keywords:
+    - premium luxury candle product photography
+    - realistic amber glass candle jar with soft glowing flame
+    - coastal-inspired tabletop scene with driftwood and linen textures
+    - warm golden sunset lighting with soft cinematic shadows
+    - elegant summer home lifestyle atmosphere with natural materials
+    - shallow depth of field with candle sharply in focus
+    - candle positioned center-right with clean silhouette
+    - clean left-side or lower-left negative space for copy overlay
+    - upscale lifestyle brand campaign aesthetic
+    - soft reflections and cozy ambient highlights
+  prompt_avoid:
+    - halloween styling
+    - christmas holiday decorations
+    - cartoon candle illustrations
+    - multiple candles cluttering the frame
+    - excessive smoke or dramatic flame effects
+    - dark gothic atmosphere
+    - cheap discount-store product appearance
+    - text or labels embedded into the image
+    - candles cropped off at the edge
+    - busy backgrounds that interfere with copy placement
